@@ -306,4 +306,55 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path != "/chat":
-            self._send_json(404, {"error": "not found"}
+            self._send_json(404, {"error": "not found"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            session_id = body.get("session_id", "default")
+            prompt = body.get("prompt", "")
+            with _state_lock:
+                ready = _status["status"] == "ready"
+            if not ready:
+                self._send_json(503, {"error": "worker ยังโหลดโมเดลไม่เสร็จ"})
+                return
+            result = _handle_chat(session_id, prompt)
+            self._send_json(200, result)
+        except Exception as e:
+            log(f"do_POST error: {type(e).__name__} - {e}\n{traceback.format_exc()}")
+            self._send_json(500, {"error": str(e)})
+
+
+def main():
+    log("=" * 50)
+    log("RAG worker กำลังเริ่มทำงาน...")
+
+    # ห่อการ bind + serve ด้วย try/except เสมอ เพราะโปรเซสนี้รันแบบ detached
+    # (stdout/stderr ไปที่ DEVNULL) — ถ้าไม่ log ไว้ก่อนตาย exception จะหายไปเงียบๆ
+    # โดยไม่มีร่องรอยอะไรเลยใน rag_worker.log ทำให้ debug ไม่ได้เลย
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError as e:
+        log(f"BIND ล้มเหลว: ไม่สามารถเปิด port {PORT} ได้ ({type(e).__name__}: {e}) "
+            f"— อาจมีโปรแกรมอื่นใช้ port นี้อยู่แล้ว หรือมี rag_worker.py instance เก่าค้างอยู่ "
+            f"ลองรัน stop_worker.bat แล้วเช็ค netstat -ano | findstr :{PORT}")
+        with _state_lock:
+            _status["status"] = "error"
+            _status["detail"] = f"Bind port {PORT} ล้มเหลว: {e}"
+        return
+
+    loader_thread = threading.Thread(target=_load_everything, daemon=True)
+    loader_thread.start()
+
+    log(f"HTTP server ฟังอยู่ที่ 127.0.0.1:{PORT} (โหลดโมเดลต่อใน background)")
+    try:
+        server.serve_forever()
+    except Exception as e:
+        log(f"serve_forever() ล้มเหลว: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        with _state_lock:
+            _status["status"] = "error"
+            _status["detail"] = f"Server ล้ม: {e}"
+
+
+if __name__ == "__main__":
+    main()

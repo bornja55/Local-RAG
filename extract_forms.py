@@ -113,4 +113,21 @@ def process_files():
                 try:
                     response = client.models.generate_content(
                         model='gemini-3.1-flash-lite',
-                        content
+                        contents=prompt_template.format(raw_text=raw_text)
+                    )
+                    
+                    # บันทึกไฟล์
+                    out_path = os.path.join(OUTPUT_DIR, f"{file_name}.md")
+                    with open(out_path, "w", encoding="utf-8") as f:
+                        f.write(response.text)
+                    print(f"Saved -> {out_path}\n")
+                except Exception as e:
+                    print(f"Gemini API Error for {file}: {e}")
+            else:
+                if ext in ['.docx', '.xlsx']:
+                    print(f"Skipped {file} (No text extracted)")
+
+if __name__ == "__main__":
+    print("Starting Form Extraction Process...")
+    process_files()
+    print("Extraction Completed!")
