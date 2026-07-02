@@ -1,0 +1,28 @@
+# Secrets — ห้าม commit เด็ดขาด
+.env
+
+# Python virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# โมเดล (ไฟล์ weight ใหญ่มาก ไม่เหมาะกับ git ปกติ)
+models/
+
+# FAISS index + docstore ที่ build ไว้ (generated, build ใหม่ได้ด้วย build_index.py)
+storage/
+
+# เอกสารนโยบายบริษัท (ข้อมูล proprietary ไม่ควรอยู่ใน git)
+Policies/
+Procedures/
+Manuals/
+Forms/
+Forms_Raw/
+
+# Log files
+*.log
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db

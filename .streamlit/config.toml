@@ -1,0 +1,11 @@
+[server]
+# ปิดการแสกนไฟล์อัตโนมัติ (File Watcher) เพื่อป้องกันไม่ให้ Streamlit ไปแสกนโดนไลบรารี Transformers
+# เหมาะสมสำหรับการรันแอป Local RAG แบบ Production (แอปจะกิน CPU น้อยลงด้วย)
+fileWatcherType = "none"
+
+[browser]
+# ปิด anonymous usage telemetry ของ Streamlit เอง — ตัวนี้ยิง network call อัตโนมัติ
+# ทันทีที่เปิดแอป (ไม่เกี่ยวกับ user action ใดๆ) แล้วไปกระตุ้น Windows proxy auto-detection
+# ผ่าน WINHTTP.dll ซึ่ง crash (access violation) บนเครื่อง corporate domain ที่มี PAC/proxy
+# auto-config เพราะถูกเรียกจาก thread ของ Streamlit ที่ไม่ตรง threading model ที่ WinHTTP ต้องการ
+gatherUsageStats = false
