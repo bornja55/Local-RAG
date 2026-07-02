@@ -34,6 +34,24 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKER_SCRIPT = os.path.join(BASE_DIR, "rag_worker.py")
 
 
+def _load_dotenv(path: str) -> None:
+    """โหลด KEY=VALUE จาก .env แบบง่ายๆ (เหมือน rag_worker.py) ใช้แค่เพื่ออ่าน COMPANY_NAME
+    มาโชว์บนหน้าเว็บ — ตัว API key จริงถูกใช้งานฝั่ง rag_worker.py เท่านั้น"""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
+
+
+_load_dotenv(os.path.join(BASE_DIR, ".env"))
+COMPANY_NAME = os.environ.get("COMPANY_NAME", "องค์กรของคุณ")
+
+
 # ── Worker process management ───────────────────────────────────────────────
 
 def _check_worker_health() -> dict | None:
@@ -120,9 +138,9 @@ def _call_worker_chat(session_id: str, prompt: str) -> dict:
 
 # ── UI ───────────────────────────────────────────────────────────────────
 
-st.set_page_config(page_title="24CS Policy RAG Assistant", page_icon="🤖", layout="wide")
-st.title("🤖 24CS Policy RAG Assistant (Powered by Gemini)")
-st.caption("ระบบถาม-ตอบนโยบายบริษัท บริษัท ทเวนตี้ โฟร์ คอน แอนด์ ซัพพลาย จำกัด (มหาชน)")
+st.set_page_config(page_title="Policy RAG Assistant", page_icon="🤖", layout="wide")
+st.title("🤖 Policy RAG Assistant (Powered by Gemini)")
+st.caption(f"ระบบถาม-ตอบนโยบายและระเบียบปฏิบัติของ {COMPANY_NAME}")
 
 ensure_worker_started()
 _wait_for_worker_ready()
@@ -213,3 +231,4 @@ if prompt := st.chat_input("พิมพ์คำถามของคุณท�
                         st.write(f"**ไฟล์:** {src.get('file_name', 'Unknown')}")
                         st.write(f"**เนื้อหาที่พบ:** {src.get('content', '')}...")
                         st.write("---")
+                                                                                                                                                                                                                                                               
