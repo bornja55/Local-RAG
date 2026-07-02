@@ -20,6 +20,9 @@ Built to work with **any organization**, not tied to a specific company. Just po
 - **🏢 Rebrandable without touching code** — Set your organization's name via the `COMPANY_NAME` variable in `.env`. Deploy the same codebase for as many organizations as you need.
 - **🛡️ Built to survive long sessions** — The AI processing runs in a completely separate process from the web UI (see architecture below), so the page doesn't freeze or crash after sitting idle.
 - **💾 Your documents never leave your machine** — Everything runs locally except the call to the Gemini API used to compose the final answer.
+- **📝 Draft new policies with automatic self-review (experimental)** — Not just retrieval: compose a brand-new policy document in one click, grounded in your existing policies for consistency, with an instant report flagging anything worth double-checking before you use it. See details below.
+- **💬 Discuss your draft in chat (same session only)** — After drafting, switch back to regular Q&A mode and ask follow-up questions about it (e.g. "explain section 3 of the draft"). Clearly labeled as unapproved AI-generated content so it never gets confused with real policy.
+- **🔁 Automatic model fallback on quota limits (optional)** — Configure a fallback model in `.env`; if the primary model hits its quota repeatedly, the system automatically retries with the fallback — no manual intervention needed.
 
 ---
 
@@ -66,6 +69,43 @@ To fully shut the system down (forcing a fresh model load next time — e.g. aft
 
 ---
 
+## 📝 Draft Mode (Experimental)
+
+Normal Q&A mode only answers from what's actually in your documents (to prevent hallucination). But sometimes you need to **draft a policy that doesn't exist yet** — say, a procurement policy or a PDPA privacy policy. Draft mode does that: it asks for the details it actually needs first, then drafts, and reviews its own work before handing it to you.
+
+**How to use it:** turn on the "📝 Draft Mode (Experimental)" toggle in the sidebar, then follow two steps:
+
+1. Enter the policy topic (and any extra instructions) → click **"❓ Generate Clarifying Questions."** The system compares your topic against existing policies and asks only about what's actually missing (e.g. a "PDPA Policy" topic will trigger questions about what personal data you collect, whether you have a DPO, etc. — things your existing IT/Risk policies don't cover). Answer what you know; skip anything you're unsure about, nothing is required.
+2. Click **"✅ Confirm Draft."** The system drafts the document from what you provided, then critiques it immediately.
+
+**What you get:**
+1. A full policy draft (Markdown), grounded in the format and principles of your existing policies. Anywhere you skipped a question, the draft inserts a `[Needs input: ...]` marker instead of guessing an answer.
+2. An immediate review — the system critiques its own draft against your existing policies, in four severity levels: **CRITICAL** (clear conflict / high risk), **WARNING** (worth checking before use — including any leftover `[Needs input: ...]` markers), **NITPICK** (minor), **VERDICT** (one-line summary).
+3. A "Download as Word (.docx)" button.
+
+**Good to know:**
+- ⚠️ **This draft is not a finished document.** A human must always review and approve it before real use — even if the review found no CRITICAL issues. The download button stays active even when CRITICAL issues are found, because the draft is meant as a starting point for you to revise, not a final ruling.
+- The .docx file is a plain structured document (headings/paragraphs/bullets) — it **does not match your organization's real template** (no signature/approval tables, revision history, or letterhead). Copy the content into your actual template before submitting it for approval.
+- Draft mode uses a different Gemini model from regular Q&A for the drafting and critique steps (configurable via `GEMINI_MODEL_DRAFT` in `.env`, default `gemini-3.5-flash`), since composing and critiquing a document needs more reasoning than plain retrieval. The clarifying-questions step reuses the regular Q&A model (`GEMINI_MODEL_CHAT`) since it's a lighter task — so each full draft request costs more than a regular question, but less than if every step used the heavier model.
+- Once a draft is confirmed, switch the toggle back off and return to regular chat — you'll see a banner letting you know this session has a draft you can ask about. This only works within the same session (same browser tab) — closing or refreshing the page clears it from chat memory (it does not delete any .docx file you already downloaded).
+
+---
+
+## 🔁 Automatic Model Fallback on Quota Limits (Optional)
+
+If heavy usage causes your primary model to hit its quota (429 / RESOURCE_EXHAUSTED) often, configure a fallback model in `.env`:
+
+```
+GEMINI_MODEL_CHAT_FALLBACK=gemma-4-26b
+GEMINI_MODEL_DRAFT_FALLBACK=gemma-4-31b
+```
+
+The system only switches to the fallback **after the primary model has exhausted all 3 retries and is still hitting a quota error** — it never falls back on the first error, and never falls back for non-quota errors. The default is empty, which disables this feature entirely (original behavior unchanged).
+
+**Good to know:** responses within the same session may occasionally come from a different model without any explicit notice. Test the quality of whichever fallback model you choose before relying on it in production (see ADR-003).
+
+---
+
 ## 🏗️ Architecture
 
 The app is split into two separate processes that talk to each other over local HTTP:
@@ -78,6 +118,7 @@ The app is split into two separate processes that talk to each other over local 
 Other files in the project:
 - `build_index.py` — builds/rebuilds the search index (`storage/`) from documents in `Policies/Procedures/Manuals/Forms` — re-run any time documents are added.
 - `extract_forms.py`, `convert_forms_to_txt.py`, `dump_raw_forms.py` — tools for converting raw form files into Markdown before ingestion.
+- `generate_docx.py` — converts Markdown to a .docx file, used by Draft Mode (see above).
 - `test_rag_pipeline.py` — an end-to-end test that verifies the system works correctly (no need to launch Streamlit first). Run with `python test_rag_pipeline.py`.
 
 ---
