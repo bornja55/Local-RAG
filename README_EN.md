@@ -33,6 +33,18 @@ Built to work with **any organization**, not tied to a specific company. Just po
 
 None of the above are stored in git (see why below) — you'll need to provide them yourself in the project folder.
 
+**⚠️ Check before installing — free up at least 15 GB of disk space**
+
+This system uses noticeably more disk space than a typical app, because it runs AI models locally instead of just calling an API:
+
+| Component | Approx. size |
+|---|---|
+| All libraries in `requirements.txt` (mainly PyTorch + LlamaIndex) | ~5-7 GB |
+| Embedding model (BGE-M3) + reranker (BGE-reranker-v2-m3) in `models/` | ~4-5 GB |
+| Search index `storage/` built by `build_index.py` | Tens of MB for a typical policy document set (grows with more documents) |
+
+**On GPUs:** not required — the system is designed to run fine on CPU (that's why the first launch waits ~4-5 minutes for models to load, as noted below). If you have an NVIDIA GPU and want `build_index.py` and model loading to run faster, install a CUDA-enabled build of PyTorch yourself **before** running `pip install -r requirements.txt` — the version pulled in by that file is CPU-only by default. Pick the install command that matches your GPU at [pytorch.org/get-started](https://pytorch.org/get-started/locally/).
+
 1. Copy `.env.example` to `.env` and fill in your API key and organization name:
    ```
    GOOGLE_API_KEY=your-gemini-api-key-here
@@ -42,7 +54,7 @@ None of the above are stored in git (see why below) — you'll need to provide t
    ```
    pip install -r requirements.txt
    ```
-3. Build the search index from your documents (run once before first use, and again any time documents are added or edited):
+3. Build the search index from your documents (no extra install needed — uses the same libraries from step 2; run once before first use, and again any time documents are added or edited):
    ```
    python build_index.py
    ```
