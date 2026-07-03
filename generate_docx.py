@@ -9,9 +9,11 @@ import io
 import re
 
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, RGBColor
 
-_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+# จับทั้ง **bold** ของ markdown และมาร์ก [ต้องระบุ: ...] (ดู ADR-002) ในรอบเดียว เพื่อรักษาลำดับ
+# ตำแหน่งข้อความให้ถูกต้องเวลาทั้งสองแบบอยู่ในบรรทัดเดียวกัน
+_INLINE_RE = re.compile(r"\*\*(?P<bold>.+?)\*\*|(?P<marker>\[ต้องระบุ:[^\]]*\])")
 
 
 def _add_markdown_line(doc: Document, line: str) -> None:
@@ -41,13 +43,20 @@ def _add_markdown_line(doc: Document, line: str) -> None:
 
 
 def _add_runs_with_bold(paragraph, text: str) -> None:
-    """แตก text เป็น run ปกติ/ตัวหนา ตามเครื่องหมาย **...** ของ markdown"""
+    """แตก text เป็น run ปกติ/ตัวหนา ตามเครื่องหมาย **...** ของ markdown และทำตัวหนา+สีแดง
+    ให้กับมาร์ก [ต้องระบุ: ...] (ดู ADR-002) เพื่อให้ผู้ตรวจร่างเห็นจุดที่ยังขาดข้อมูลชัดเจน
+    เปิดไฟล์ Word แล้วไม่กลืนไปกับข้อความปกติ"""
     pos = 0
-    for m in _BOLD_RE.finditer(text):
+    for m in _INLINE_RE.finditer(text):
         if m.start() > pos:
             paragraph.add_run(text[pos:m.start()])
-        run = paragraph.add_run(m.group(1))
-        run.bold = True
+        if m.group("bold") is not None:
+            run = paragraph.add_run(m.group("bold"))
+            run.bold = True
+        else:
+            run = paragraph.add_run(m.group("marker"))
+            run.bold = True
+            run.font.color.rgb = RGBColor(0xC0, 0x00, 0x00)
         pos = m.end()
     if pos < len(text):
         paragraph.add_run(text[pos:])

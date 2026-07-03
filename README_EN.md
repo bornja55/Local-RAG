@@ -96,13 +96,27 @@ Normal Q&A mode only answers from what's actually in your documents (to prevent 
 If heavy usage causes your primary model to hit its quota (429 / RESOURCE_EXHAUSTED) often, configure a fallback model in `.env`:
 
 ```
-GEMINI_MODEL_CHAT_FALLBACK=gemma-4-26b
-GEMINI_MODEL_DRAFT_FALLBACK=gemma-4-31b
+GEMINI_MODEL_CHAT_FALLBACK=gemma-4-26b-a4b-it
+GEMINI_MODEL_DRAFT_FALLBACK=gemma-4-31b-it
 ```
+
+⚠️ **Use the exact model name the Gemini API expects** — Gemma 4 is only reachable through the Gemini API using names with an `-it` suffix (`gemma-4-26b-a4b-it`, `gemma-4-31b-it`). The short form (`gemma-4-26b`) returns `404 NOT_FOUND` immediately.
 
 The system only switches to the fallback **after the primary model has exhausted all 3 retries and is still hitting a quota error** — it never falls back on the first error, and never falls back for non-quota errors. The default is empty, which disables this feature entirely (original behavior unchanged).
 
+**Before relying on this in production — test the fallback model standalone first:**
+```
+venv\Scripts\python.exe test_fallback_model.py gemma-4-26b-a4b-it
+```
+This calls the model directly, bypassing the worker/app entirely. If the model you picked doesn't actually work (wrong name, unsupported through `GoogleGenAI`, etc.) you'll see the error immediately here — instead of discovering it only when the primary model's quota is actually exhausted and the fallback fails too.
+
 **Good to know:** responses within the same session may occasionally come from a different model without any explicit notice. Test the quality of whichever fallback model you choose before relying on it in production (see ADR-003).
+
+---
+
+## 🧹 Session Cleanup (Automatic)
+
+Chat/draft sessions idle for longer than `SESSION_IDLE_TIMEOUT_SECONDS` (default 8 hours, configurable in `.env`) are automatically removed from the worker's memory every 10 minutes, preventing unbounded memory growth if the worker runs continuously for days. No action needed — this is handled automatically (see ADR-005).
 
 ---
 
@@ -120,6 +134,7 @@ Other files in the project:
 - `extract_forms.py`, `convert_forms_to_txt.py`, `dump_raw_forms.py` — tools for converting raw form files into Markdown before ingestion.
 - `generate_docx.py` — converts Markdown to a .docx file, used by Draft Mode (see above).
 - `test_rag_pipeline.py` — an end-to-end test that verifies the system works correctly (no need to launch Streamlit first). Run with `python test_rag_pipeline.py`.
+- `test_fallback_model.py` — standalone test to verify a candidate fallback model actually works through `GoogleGenAI` before setting it in `.env` (see "Automatic Model Fallback" above).
 
 ---
 

@@ -34,6 +34,8 @@
 
 - **Chat เห็นร่างในเซสชัน**: โหมดถาม-ตอบปกติสามารถอ้างอิงเนื้อหาจากร่างที่เพิ่งสร้างในโหมดร่างเอกสารได้ แต่จำกัดขอบเขตแค่ "เซสชันเดียวกัน" เท่านั้น (ไม่บันทึกลง index ถาวร ไม่ปนกับนโยบายจริง) และติดป้ายกำกับชัดเจนทั้งใน chat memory และ UI ว่าเป็นเนื้อหา AI สร้างที่ยังไม่ผ่านการอนุมัติ (ดู ADR-004) implement ผ่าน `_inject_draft_into_session()` ที่ฉีด synthetic user+assistant turn เข้า `ChatMemoryBuffer` ของ session เดียวกับที่ `/chat` ใช้ — ไม่ได้แก้กฎเหล็กของ `_build_sys_prompt()` แต่อย่างใด
 
+- **Session eviction**: กลไกลบ session (ChatMemoryBuffer) ที่ไม่ได้ใช้งานเกิน `SESSION_IDLE_TIMEOUT_SECONDS` (ดีฟอลต์ 8 ชม.) ออกจาก memory ของ worker อัตโนมัติ ป้องกัน `_sessions` dict โตไม่มีเพดานถ้าปล่อยรันต่อเนื่องนานๆ — รันเป็น background thread แยก (`_cleanup_idle_sessions`) ตื่นทุก 10 นาที ตรวจ `_session_last_used` (ดู ADR-005)
+
 ## เอกสารที่เกี่ยวข้อง
 
 - [README.md](README.md) — วิธีติดตั้ง/ใช้งาน และสถาปัตยกรรมระบบ

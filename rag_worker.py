@@ -35,6 +35,10 @@ Endpoints:
     โมเดลสำรองโดยอัตโนมัติ เฉพาะกรณี retry โมเดลหลักครบ 3 ครั้งแล้วยังชนโควตาอยู่ (ดู ADR-003)
     ไม่ได้ retry โมเดลสำรองซ้ำ — ถ้าโมเดลสำรอง error ด้วยก็คืน error ตามปกติ
 
+Session cleanup:
+    session ที่ไม่ได้ใช้งานเกิน SESSION_IDLE_TIMEOUT_SECONDS (ดีฟอลต์ 8 ชม.) จะถูกลบออกจาก memory
+    อัตโนมัติทุก 10 นาที ป้องกัน worker กินแรมโตไม่มีเพดานถ้าปล่อยรันต่อเนื่องนานๆ (ดู ADR-005)
+
 รันแบบ standalone:
     venv\\Scripts\\python.exe rag_worker.py
 (ปกติแล้ว app.py จะ auto-start ให้เองถ้ายังไม่ได้รันอยู่ ไม่ต้องรันมือ)
@@ -107,9 +111,13 @@ GEMINI_MODEL_CHAT  = os.environ.get("GEMINI_MODEL_CHAT", "gemini-3.1-flash-lite"
 GEMINI_MODEL_DRAFT = os.environ.get("GEMINI_MODEL_DRAFT", "gemini-3.5-flash")
 
 # โมเดลสำรองเมื่อโมเดลหลักชนโควตาต่อเนื่อง (ดู ADR-003) — ค่าเริ่มต้นว่างเปล่า = ไม่มี fallback,
-# พฤติกรรมเหมือนเดิมทุกประการ ตั้งค่าผ่าน .env เท่านั้น (เช่น GEMINI_MODEL_CHAT_FALLBACK=gemma-4-26b)
+# พฤติกรรมเหมือนเดิมทุกประการ ตั้งค่าผ่าน .env เท่านั้น (เช่น GEMINI_MODEL_CHAT_FALLBACK=gemma-4-26b-a4b-it)
 GEMINI_MODEL_CHAT_FALLBACK  = os.environ.get("GEMINI_MODEL_CHAT_FALLBACK", "").strip()
 GEMINI_MODEL_DRAFT_FALLBACK = os.environ.get("GEMINI_MODEL_DRAFT_FALLBACK", "").strip()
+
+# หมดอายุ session ที่ไม่ได้ใช้งานนาน (ดู ADR-005) — ป้องกัน _sessions dict โตไม่มีเพดานถ้า worker
+# รันต่อเนื่องนานๆ โดยไม่ restart ค่าเริ่มต้น 8 ชั่วโมง ปรับได้ผ่าน .env
+SESSION_IDLE_TIMEOUT_SECONDS = int(os.environ.get("SESSION_IDLE_TIMEOUT_SECONDS", str(8 * 60 * 60)))
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -138,6 +146,7 @@ _index = None
 _reranker = None
 _sys_prompt = None
 _sessions: dict[str, object] = {}  # session_id -> ChatMemoryBuffer
+_session_last_used: dict[str, float] = {}  # session_id -> unix timestamp ที่ใช้งานล่าสุด (ดู ADR-005)
 _sessions_lock = threading.Lock()
 
 
@@ -320,8 +329,22 @@ def _load_everything() -> None:
 
 
 def _is_quota_error(e: Exception) -> bool:
+    """เช็คว่า exception เป็น quota/rate-limit error หรือไม่ — ใช้ word-boundary regex แทน
+    substring match ตรงๆ กัน false positive (เช่น "429" ไปแมตช์เลข ID ที่ขึ้นต้นด้วย 429,
+    หรือ "quota" ไปแมตช์คำว่า "quotation") สำคัญขึ้นกว่าเดิมเพราะผลของฟังก์ชันนี้ตอนนี้ใช้ตัดสินใจ
+    ว่าจะสลับไปโมเดลสำรองเลยหรือไม่ (ดู ADR-003) ไม่ใช่แค่ retry โมเดลเดิมเหมือนก่อนหน้า"""
+    code = getattr(e, "code", None) or getattr(e, "status_code", None)
+    if code == 429:
+        return True
+
     s = str(e)
-    return "429" in s or "RESOURCE_EXHAUSTED" in s or "quota" in s.lower()
+    if re.search(r"\b429\b", s):
+        return True
+    if "RESOURCE_EXHAUSTED" in s:
+        return True
+    if re.search(r"\bquota\b", s, re.IGNORECASE):
+        return True
+    return False
 
 
 def _complete_with_fallback(
@@ -364,6 +387,25 @@ def _complete_with_fallback(
     return None, last_error
 
 
+def _cleanup_idle_sessions() -> None:
+    """ลบ session ที่ไม่ได้ใช้งานเกิน SESSION_IDLE_TIMEOUT_SECONDS ออกจาก _sessions/_session_last_used
+    รันเป็น background thread แยกต่างหาก ตื่นทุก 10 นาที ป้องกัน memory ของ worker โตไม่มีเพดาน
+    ถ้าปล่อยรันต่อเนื่องนานๆ โดยไม่ restart (ดู ADR-005)"""
+    while True:
+        time.sleep(600)
+        now = time.time()
+        with _sessions_lock:
+            expired = [
+                sid for sid, last_used in _session_last_used.items()
+                if now - last_used > SESSION_IDLE_TIMEOUT_SECONDS
+            ]
+            for sid in expired:
+                _sessions.pop(sid, None)
+                _session_last_used.pop(sid, None)
+        if expired:
+            log(f"[CLEANUP] ลบ {len(expired)} session ที่ idle เกิน {SESSION_IDLE_TIMEOUT_SECONDS}s")
+
+
 def _handle_chat(session_id: str, prompt: str) -> dict:
     from llama_index.llms.google_genai import GoogleGenAI
     from llama_index.core.memory import ChatMemoryBuffer
@@ -373,6 +415,7 @@ def _handle_chat(session_id: str, prompt: str) -> dict:
         if session_id not in _sessions:
             _sessions[session_id] = ChatMemoryBuffer.from_defaults(token_limit=8000)
         memory = _sessions[session_id]
+        _session_last_used[session_id] = time.time()
 
     def _build_chat_engine(model: str):
         # สร้าง llm + chat_engine ใหม่ทุกครั้งที่เรียก (ยืนยันแล้วจาก diagnostic tests ว่า
@@ -513,6 +556,7 @@ def _inject_draft_into_session(session_id: str, topic: str, draft_text: str, scr
         if session_id not in _sessions:
             _sessions[session_id] = ChatMemoryBuffer.from_defaults(token_limit=8000)
         memory = _sessions[session_id]
+        _session_last_used[session_id] = time.time()
 
     label = (
         f'[ร่างเอกสารที่ AI สร้างในโหมดร่างเอกสาร หัวข้อ "{topic}" '
@@ -718,7 +762,11 @@ def main():
     loader_thread = threading.Thread(target=_load_everything, daemon=True)
     loader_thread.start()
 
-    log(f"HTTP server ฟังอยู่ที่ 127.0.0.1:{PORT} (โหลดโมเดลต่อใน background)")
+    cleanup_thread = threading.Thread(target=_cleanup_idle_sessions, daemon=True)
+    cleanup_thread.start()
+
+    log(f"HTTP server ฟังอยู่ที่ 127.0.0.1:{PORT} (โหลดโมเดลต่อใน background, "
+        f"cleanup session ทุกไม่เกิน {SESSION_IDLE_TIMEOUT_SECONDS}s idle)")
     try:
         server.serve_forever()
     except Exception as e:
