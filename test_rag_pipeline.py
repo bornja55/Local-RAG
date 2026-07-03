@@ -334,4 +334,20 @@ def main() -> int:
             print(f"   error: {r10.get('error')}")
     else:
         print(f"   error: {r9.get('error')}")
-        results.append(("/draft/questions/interactive คืน prefill ของ
+        results.append(("/draft/questions/interactive คืน prefill ของหัวข้อแรก (ไม่ error)", False))
+
+    _print_summary(results)
+    return 0 if all(ok for _, ok in results) else 1
+
+
+def _print_summary(results):
+    print("\n" + "=" * 50)
+    print("สรุปผลทดสอบ")
+    print("=" * 50)
+    for name, ok in results:
+        print(f"{PASS if ok else FAIL}  {name}")
+    print("=" * 50)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

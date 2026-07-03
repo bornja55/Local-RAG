@@ -733,4 +733,30 @@ if prompt := st.chat_input("พิมพ์คำถามของคุณท�
 
     with st.chat_message("assistant"):
         with st.spinner("กำลังค้นหาและประมวลผลคำตอบ..."):
-            result = _call_work
+            result = _call_worker_chat(st.session_state.session_id, prompt)
+
+        if "error" in result:
+            st.error(f"เกิดข้อผิดพลาด: {result['error']}")
+        else:
+            full_response = result["response"]
+            st.markdown(full_response)
+            resp_time = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            tokens = result.get("tokens", 0)
+            st.markdown(
+                f"<small style='color:gray;'>⏱️ {resp_time} | 🪙 Tokens: ~{tokens}</small>",
+                unsafe_allow_html=True,
+            )
+            sources = result.get("sources", [])
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": full_response,
+                "time": resp_time,
+                "tokens": tokens,
+                "sources": sources,
+            })
+            if sources:
+                with st.expander("ดูเอกสารอ้างอิง (Sources)"):
+                    for src in sources:
+                        st.write(f"**ไฟล์:** {src.get('file_name', 'Unknown')}")
+                        st.write(f"**เนื้อหาที่พบ:** {src.get('content', '')}...")
+                        st.write("---")

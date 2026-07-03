@@ -1,6 +1,6 @@
 *Read this in other languages: [🇹🇭 ภาษาไทย](README_MANAGEMENT.md), [🇬🇧 English](README_MANAGEMENT_EN.md)*
 
-# 🤖 Policy RAG Assistant — Leadership Summary (v2.2)
+# 🤖 Policy RAG Assistant — Leadership Summary (v2.3)
 
 ![Status](https://img.shields.io/badge/Status-Live%20%26%20Tested-2ECC71?style=for-the-badge)
 ![Data](https://img.shields.io/badge/Data-On--Prem%20Only-3498DB?style=for-the-badge)
@@ -10,7 +10,13 @@ An AI assistant that answers employee questions about **Origin Global Empire PLC
 
 ---
 
-## 🆕 Latest Update — v2.2
+## 🆕 Latest Update — v2.3
+
+**Status: Shipped** — found during an internal code review following v2.2.
+
+- **Closed a gap that could silently disable the backup model (v2.2) in some cases:** Previously the system only switched to a backup model when the primary model ran out of quota. If the primary model was simply too slow and hit the timeout cap (also introduced in v2.2), the system would not try any backup model at all, despite 5 being configured. Fixed so both failure modes now trigger the backup-model switch equally.
+
+## 🕒 Previous Updates — v2.2
 
 **Status: Shipped** — verified with 11/11 end-to-end test cases (up from 6/6, reflecting the new features added).
 
@@ -57,3 +63,20 @@ Added the ability for the system to draft entirely new policies (not just retrie
 
 | Risk | Mitigation in place |
 |---|---|
+| AI gives incorrect/fabricated answers in Q&A mode | Hard rule forces answers to come only from real documents ("iron rule") — never relaxed at any point during development |
+| An AI-drafted document gets used without review | Every screen shows a clear warning + the AI critiques its own draft before handing it to a human + points of uncertainty are explicitly flagged |
+| Draft content gets mixed up with real policy in chat | Limited to the same session only, never saved to permanent storage, clearly labeled at every point |
+| Company data leaving the organization | All documents and processing stay on internal machines; only the summarization call to the Gemini API leaves the machine |
+| Service stops responding under heavy load | 5 backup models per function, all tested and confirmed working (v2.2); pending the team's go-live date |
+| System memory grows unbounded over time, degrading performance | Idle sessions (8+ hours) are automatically purged every 10 minutes (v2.1) |
+| AI requests hang with no response and no warning | Each request is now capped at 5 minutes; past that, a clear error is returned instead of hanging silently (v2.2) |
+
+## 🗳️ Decisions Needed from Leadership / IT
+
+1. **Enable the backup model in production** — expanded from 1 to 5 models per function, all tested and confirmed working; the only remaining step is for the team to set a go-live date.
+2. **Gemini API budget** — cost scales with usage; if this is rolled out more broadly, budget should be estimated in advance.
+3. **Storage planning for additional machines** — the system needs ~15GB of disk space per installed machine (AI models + libraries); plan ahead if deploying to more machines.
+
+---
+
+*This document is a summary for leadership and line managers. Full technical documentation is in [README.md](README.md); architectural decisions are recorded in [ADR.md](ADR.md).*

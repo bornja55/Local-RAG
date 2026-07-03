@@ -396,6 +396,34 @@ def _is_quota_error(e: Exception) -> bool:
     return False
 
 
+def _is_fallback_worthy_error(e: Exception) -> bool:
+    """เช็คว่า exception นี้ควรสลับไปโมเดลสำรองหรือไม่ — ครอบคลุมกว้างกว่า _is_quota_error()
+    เพราะเดิมฟังก์ชันนี้ (ก่อน 2026-07-03) ใช้แค่ _is_quota_error() เป็นเงื่อนไขเดียวในการตัดสินใจ
+    fallback ทำให้ timeout error (จาก GEMINI_REQUEST_TIMEOUT_MS ที่เพิ่มไว้ก่อนหน้า) ไม่เคยสลับไป
+    โมเดลสำรองเลยแม้จะตั้งค่าไว้ครบ 5 ตัว — โมเดลหลักช้า/ค้างแล้วผู้ใช้ได้แค่ error ตรงๆ ทั้งที่มี
+    โมเดลสำรองพร้อมใช้ (พบจากการรีวิวโค้ดแบบ outsider — ดู ADR-003 หมายเหตุเพิ่มเติม 2026-07-03 ส่วน
+    "fallback ไม่ครอบคลุม timeout") ตอนนี้ครอบคลุมทั้ง quota error และ timeout/connection/server error
+    เพราะทั้งสองแบบคือ "โมเดลหลักใช้ไม่ได้ตอนนี้" เหมือนกัน ควรลองโมเดลสำรองแทนการโยน error ตรงๆ
+    หมายเหตุ: ใช้แค่ตัดสินใจ "จะ fallback ไหม" เท่านั้น ไม่ใช้กับ retry-with-backoff ของโมเดลหลัก
+    (retry ยังผูกกับ _is_quota_error() เดิม เพราะ backoff มีประโยชน์กับ quota ที่ตอบเร็วเท่านั้น —
+    ถ้าเอา timeout ไป retry ด้วย backoff จะยิ่งเสียเวลาซ้ำก่อนได้ลองโมเดลสำรองจริงๆ)"""
+    if _is_quota_error(e):
+        return True
+
+    type_name = type(e).__name__
+    if re.search(r"timeout|deadline", type_name, re.IGNORECASE):
+        return True
+
+    s = str(e)
+    if re.search(r"timed?\s*out|deadline exceeded|timeout", s, re.IGNORECASE):
+        return True
+    if re.search(r"\b(503|504)\b", s):
+        return True
+    if re.search(r"\bUNAVAILABLE\b", s):
+        return True
+    return False
+
+
 def _build_llm(model: str):
     """สร้าง GoogleGenAI client พร้อม request timeout ที่กำหนดไว้ชัดเจน (GEMINI_REQUEST_TIMEOUT_MS)
     — ใช้ร่วมกันทุกจุดที่เรียก GoogleGenAI() ในไฟล์นี้ (ทั้ง complete() แบบ one-shot ผ่าน
@@ -435,7 +463,7 @@ def _complete_with_fallback(
                 continue
             break
 
-    if fallback_models and _is_quota_error(last_error):
+    if fallback_models and _is_fallback_worthy_error(last_error):
         for fallback_model in fallback_models:
             try:
                 log(f"{log_prefix} โมเดล {primary_model} ชนโควตา กำลังลองโมเดลสำรอง {fallback_model}...")
@@ -514,7 +542,7 @@ def _handle_chat(session_id: str, prompt: str) -> dict:
 
     # ── fallback ไปโมเดลสำรอง ไล่ทีละตัวตามลำดับใน GEMINI_MODEL_CHAT_FALLBACK ถ้าตั้งค่าไว้ และ
     # retry โมเดลหลักครบแล้วยังชนโควตาอยู่ (ดู ADR-003 — ขยายเป็นหลายโมเดลในหมายเหตุ 2026-07-03) ──
-    if response_obj is None and GEMINI_MODEL_CHAT_FALLBACK and _is_quota_error(last_error):
+    if response_obj is None and GEMINI_MODEL_CHAT_FALLBACK and _is_fallback_worthy_error(last_error):
         for fb_model in GEMINI_MODEL_CHAT_FALLBACK:
             try:
                 log(f"[CHAT session={session_id[:8]}] โมเดล {GEMINI_MODEL_CHAT} ชนโควตา "
@@ -1472,4 +1500,96 @@ class Handler(BaseHTTPRequestHandler):
             code = 400 if "error" in result else 200
             self._send_json(code, result)
         except Exception as e:
-   
+            log(f"do_POST /review/target error: {type(e).__name__} - {e}\n{traceback.format_exc()}")
+            self._send_json(500, {"error": str(e)})
+
+    def _handle_review_topic_request(self) -> None:
+        """POST /review/topic — ดู ADR-006 ข้อ 9 (stateless, client resend review_topics ทั้งก้อนทุกครั้ง)"""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            with _state_lock:
+                ready = _status["status"] == "ready"
+            if not ready:
+                self._send_json(503, {"error": "worker ยังโหลดโมเดลไม่เสร็จ"})
+                return
+            if not body.get("topic_id"):
+                self._send_json(400, {"error": "missing_topic_id", "message": "กรุณาระบุ topic_id"})
+                return
+            result = _handle_review_topic(body)
+            code = 400 if "error" in result else 200
+            self._send_json(code, result)
+        except Exception as e:
+            log(f"do_POST /review/topic error: {type(e).__name__} - {e}\n{traceback.format_exc()}")
+            self._send_json(500, {"error": str(e)})
+
+    def _handle_draft_questions_interactive_request(self) -> None:
+        """POST /draft/questions/interactive — ดู ADR-007 ข้อ 5 (endpoint ใหม่ ไม่แก้ /draft/questions เดิม)"""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            with _state_lock:
+                ready = _status["status"] == "ready"
+            if not ready:
+                self._send_json(503, {"error": "worker ยังโหลดโมเดลไม่เสร็จ"})
+                return
+            result = _handle_draft_questions_interactive(body)
+            code = 400 if "error" in result else 200
+            self._send_json(code, result)
+        except Exception as e:
+            log(f"do_POST /draft/questions/interactive error: {type(e).__name__} - {e}\n"
+                f"{traceback.format_exc()}")
+            self._send_json(500, {"error": str(e)})
+
+    def _handle_review_finalize_request(self) -> None:
+        """POST /review/finalize — ดู ADR-006 ข้อ 6 (endpoint เพิ่มเติมนอกเหนือตัวอย่างในข้อ 9)"""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            with _state_lock:
+                ready = _status["status"] == "ready"
+            if not ready:
+                self._send_json(503, {"error": "worker ยังโหลดโมเดลไม่เสร็จ"})
+                return
+            result = _handle_review_finalize(body)
+            code = 400 if "error" in result else 200
+            self._send_json(code, result)
+        except Exception as e:
+            log(f"do_POST /review/finalize error: {type(e).__name__} - {e}\n{traceback.format_exc()}")
+            self._send_json(500, {"error": str(e)})
+
+
+def main():
+    log("=" * 50)
+    log("RAG worker กำลังเริ่มทำงาน...")
+
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError as e:
+        log(f"BIND ล้มเหลว: ไม่สามารถเปิด port {PORT} ได้ ({type(e).__name__}: {e}) "
+            f"— อาจมีโปรแกรมอื่นใช้ port นี้อยู่แล้ว หรือมี rag_worker.py instance เก่าค้างอยู่ "
+            f"ลองรัน stop_worker.bat แล้วเช็ค netstat -ano | findstr :{PORT}")
+        with _state_lock:
+            _status["status"] = "error"
+            _status["detail"] = f"Bind port {PORT} ล้มเหลว: {e}"
+        return
+
+    loader_thread = threading.Thread(target=_load_everything, daemon=True)
+    loader_thread.start()
+
+    cleanup_thread = threading.Thread(target=_cleanup_idle_sessions, daemon=True)
+    cleanup_thread.start()
+
+    log(f"HTTP server ฟังอยู่ที่ 127.0.0.1:{PORT} (โหลดโมเดลต่อใน background, "
+        f"cleanup session ทุกไม่เกิน {SESSION_IDLE_TIMEOUT_SECONDS}s idle)")
+    try:
+        server.serve_forever()
+    except Exception as e:
+        log(f"serve_forever() ล้มเหลว: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        with _state_lock:
+            _status["status"] = "error"
+            _status["detail"] = f"Server ล้ม: {e}"
+
+
+if __name__ == "__main__":
+    main()
