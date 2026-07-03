@@ -11,6 +11,16 @@ test_rag_pipeline.py — สคริปต์ทดสอบเดียวท�
     6. ถามในแชทปกติ (session เดียวกับข้อ 5) เกี่ยวกับร่างที่เพิ่งสร้าง ต้องได้คำตอบไม่ error
        (ยืนยันว่า chat เห็นร่างในเซสชันเดียวกันได้ — ดู ADR-004)
 
+เทสต์เพิ่มเติมสำหรับ ADR-006 (โหมดรีวิวเอกสาร) / ADR-007 (คำถามเพิ่มเติมแบบ interactive) — เทสต์ใหม่
+ทั้งหมด ไม่แก้เทสต์ 6 ข้อด้านบนแม้แต่บรรทัดเดียว (ดู ADR-006 ข้อ 9 / ADR-007 ข้อ 5 — endpoint ใหม่
+ต้องมีเทสต์แยก ไม่แตะเทสต์เดิมที่ครอบคลุม /draft*, /chat):
+    7. เรียก /review/target ด้วยเอกสารจริงจาก corpus (มี heading ชัดเจน) ต้องได้ review_topics ไม่ว่างเปล่า
+    8. เรียก /review/target ด้วยเอกสารที่ไม่มี heading เลย (พรืดเดียว) ต้องถูกปฏิเสธด้วย
+       error == "unparseable_headings" (ดู ADR-006 ข้อ 2a)
+    9. เรียก /review/topic ด้วยหัวข้อแรกจากข้อ 7 ต้องได้ prefill กลับมาไม่ error
+    10. เรียก /draft/questions/interactive ครั้งแรก (ไม่มี review_topics) ต้องได้ review_topics ที่จัด
+        หมวดหมู่แล้วกลับมา แล้วเรียกซ้ำแบบขอ prefill ของหัวข้อแรก ต้องไม่ error (ดู ADR-007)
+
 วิธีรัน:
     venv\\Scripts\\python.exe test_rag_pipeline.py
 
@@ -22,6 +32,7 @@ import sys
 import json
 import time
 import uuid
+import base64
 import subprocess
 import urllib.request
 import urllib.error
@@ -80,16 +91,17 @@ def wait_for_ready(max_wait=400) -> bool:
     return False
 
 
-def call_chat(session_id: str, prompt: str) -> dict:
-    body = json.dumps({"session_id": session_id, "prompt": prompt}).encode("utf-8")
+def _post(path: str, payload: dict, timeout: int) -> dict:
+    """helper กลาง POST+JSON ใช้ร่วมกันโดยเทสต์ทุกข้อ (เดิม+ใหม่) — ลด try/except ซ้ำ"""
+    body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        f"{WORKER_URL}/chat",
+        f"{WORKER_URL}{path}",
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         try:
@@ -98,57 +110,75 @@ def call_chat(session_id: str, prompt: str) -> dict:
             return {"error": f"HTTP {e.code}"}
     except Exception as e:
         return {"error": str(e)}
+
+
+def call_chat(session_id: str, prompt: str) -> dict:
+    return _post("/chat", {"session_id": session_id, "prompt": prompt}, timeout=120)
 
 
 def call_clarify_questions(topic: str, instructions: str = "") -> dict:
     """เรียก /draft/questions — ขั้นตอนสร้างคำถามเพิ่มเติมก่อนร่าง (ดู ADR-002)"""
-    body = json.dumps({"topic": topic, "instructions": instructions}).encode("utf-8")
-    req = urllib.request.Request(
-        f"{WORKER_URL}/draft/questions",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        try:
-            return json.loads(e.read().decode("utf-8"))
-        except Exception:
-            return {"error": f"HTTP {e.code}"}
-    except Exception as e:
-        return {"error": str(e)}
+    return _post("/draft/questions", {"topic": topic, "instructions": instructions}, timeout=60)
 
 
 def call_draft(
     topic: str, instructions: str = "", answers: dict | None = None, session_id: str | None = None
 ) -> dict:
     """เรียก /draft — ใช้ GEMINI_MODEL_DRAFT และเรียก LLM 2 ครั้งต่อคำขอ (ร่าง + scrutinize)
-    จึง timeout ยาวกว่า call_chat()
+    จึง timeout ยาวกว่า call_chat() — worker จำกัด 1 LLM call ไว้ไม่เกิน GEMINI_REQUEST_TIMEOUT_MS
+    (ดีฟอลต์ 5 นาที) ต่อครั้ง client timeout จึงตั้งกว้างกว่านั้นพอสมควรเผื่อกรณีเลวร้ายที่สุด
     session_id: ถ้าส่งไป worker จะฉีดร่าง+scrutiny เข้า chat memory ของ session นั้น (ดู ADR-004)"""
-    body = json.dumps({
-        "topic": topic,
-        "instructions": instructions,
-        "answers": answers or {},
-        "session_id": session_id,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{WORKER_URL}/draft",
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+    return _post(
+        "/draft",
+        {"topic": topic, "instructions": instructions, "answers": answers or {}, "session_id": session_id},
+        timeout=660,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=240) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        try:
-            return json.loads(e.read().decode("utf-8"))
-        except Exception:
-            return {"error": f"HTTP {e.code}"}
-    except Exception as e:
-        return {"error": str(e)}
+
+
+def call_review_target(source: str, file_name: str, content_base64: str | None = None) -> dict:
+    """เรียก /review/target — ดู ADR-006 (รวม LLM call 1 ครั้งสำหรับ checklist-derived topics)"""
+    return _post(
+        "/review/target",
+        {"source": source, "file_name": file_name, "content_base64": content_base64},
+        timeout=360,
+    )
+
+
+def call_review_topic(
+    review_topics: list, confirmed_docs: list, answers: dict, topic_id: str,
+    requesting_followup: bool = False,
+) -> dict:
+    """เรียก /review/topic — ดู ADR-006"""
+    return _post(
+        "/review/topic",
+        {
+            "review_topics": review_topics,
+            "confirmed_cross_reference_docs": confirmed_docs,
+            "answers": answers,
+            "topic_id": topic_id,
+            "requesting_followup_for_answer": requesting_followup,
+        },
+        timeout=360,
+    )
+
+
+def call_draft_questions_interactive(
+    topic: str, instructions: str = "", review_topics: list | None = None,
+    answers: dict | None = None, topic_id: str | None = None, requesting_followup: bool = False,
+) -> dict:
+    """เรียก /draft/questions/interactive — ดู ADR-007 (ไม่แก้ /draft/questions เดิม)"""
+    return _post(
+        "/draft/questions/interactive",
+        {
+            "topic": topic,
+            "instructions": instructions,
+            "review_topics": review_topics or [],
+            "answers": answers or {},
+            "topic_id": topic_id,
+            "requesting_followup_for_answer": requesting_followup,
+        },
+        timeout=360,
+    )
 
 
 def main() -> int:
@@ -234,18 +264,74 @@ def main() -> int:
     else:
         print(f"   error: {r5.get('error')}")
 
-    _print_summary(results)
-    return 0 if all(ok for _, ok in results) else 1
+    # ── เทสต์ใหม่สำหรับ ADR-006 (โหมดรีวิวเอกสาร) — ไม่แตะเทสต์ 1-6 ด้านบนเลย ─────────────────
 
+    # 7. /review/target ด้วยเอกสารจริงจาก corpus ที่มี heading ชัดเจน (ระเบียบปฏิบัติ IT Risk —
+    # ใช้เป็น worked example ตามที่ HANDOFF.md ระบุว่ายังขาดตัวอย่าง 1 อันมา validate) ต้องได้
+    # review_topics ไม่ว่างเปล่า
+    print("\n[TEST] เรียก /review/target ด้วยเอกสารระเบียบปฏิบัติ IT Risk จาก corpus...")
+    it_risk_file = "24CS-IT-QP-001_การบริหารความเสี่ยงด้านเทคโนโลยีสารสนเทศ.md"
+    r6 = call_review_target("corpus", it_risk_file)
+    ok6 = "error" not in r6 and len(r6.get("review_topics", [])) > 0
+    results.append(("/review/target คืน review_topics ไม่ว่างเปล่า (ไม่ error)", ok6))
+    if ok6:
+        print(f"   ได้ {len(r6['review_topics'])} หัวข้อรีวิว, "
+              f"เอกสารที่เกี่ยวข้องแนะนำ {len(r6.get('suggested_cross_reference_docs', []))} ฉบับ")
+    else:
+        print(f"   error/message: {r6.get('message') or r6.get('error')}")
 
-def _print_summary(results):
-    print("\n" + "=" * 50)
-    print("สรุปผลทดสอบ")
-    print("=" * 50)
-    for name, ok in results:
-        print(f"{PASS if ok else FAIL}  {name}")
-    print("=" * 50)
+    # 8. /review/target ด้วยเอกสารพรืดเดียวไม่มี heading เลย — ต้องถูกปฏิเสธด้วย
+    # error == "unparseable_headings" (ดู ADR-006 ข้อ 2a — ปฏิเสธชัดเจน ไม่ fallback เงียบๆ)
+    print("\n[TEST] เรียก /review/target ด้วยเอกสารที่ไม่มี heading เลย (ต้องถูกปฏิเสธ)...")
+    prose_only = "เอกสารนี้เขียนเป็นพรืดเดียวไม่มีหัวข้อใดๆ เลย " * 5
+    prose_b64 = base64.b64encode(prose_only.encode("utf-8")).decode("ascii")
+    r7 = call_review_target("upload", "เอกสารทดสอบไม่มีหัวข้อ.md", prose_b64)
+    ok7 = r7.get("error") == "unparseable_headings"
+    results.append(("/review/target ปฏิเสธเอกสารไม่มี heading ถูกต้อง (unparseable_headings)", ok7))
+    if ok7:
+        print(f"   ปฏิเสธถูกต้อง: {r7.get('message', '')[:100]}...")
+    else:
+        print(f"   ผลลัพธ์ไม่ตรงคาด: {r7}")
 
+    # 9. /review/topic ด้วยหัวข้อแรกจากข้อ 7 (ถ้าข้อ 7 สำเร็จ) — ต้องได้ prefill กลับมาไม่ error
+    print("\n[TEST] เรียก /review/topic ขอ prefill ของหัวข้อแรก...")
+    if ok6 and r6.get("review_topics"):
+        first_topic_id = r6["review_topics"][0]["id"]
+        confirmed_docs = r6.get("suggested_cross_reference_docs", [])
+        r8 = call_review_topic(r6["review_topics"], confirmed_docs, {}, first_topic_id)
+        ok8 = "error" not in r8 and "prefill" in r8
+        results.append(("/review/topic คืน prefill (ไม่ error)", ok8))
+        if ok8:
+            print(f"   prefill: {str(r8.get('prefill', ''))[:150]}...")
+        else:
+            print(f"   error: {r8.get('error')}")
+    else:
+        results.append(("/review/topic คืน prefill (ไม่ error)", False))
+        print("   ข้าม — ทดสอบข้อ 7 ไม่สำเร็จ ไม่มี review_topics ให้ใช้")
 
-if __name__ == "__main__":
-    sys.exit(main())
+    # ── เทสต์ใหม่สำหรับ ADR-007 (คำถามเพิ่มเติมแบบ interactive) — ไม่แก้ /draft/questions เดิม ────
+
+    # 10. /draft/questions/interactive ครั้งแรก (ไม่มี review_topics) ต้องได้ review_topics ที่จัด
+    # หมวดหมู่แล้วกลับมา แล้วเรียกซ้ำแบบขอ prefill ของหัวข้อแรก ต้องไม่ error (ดู ADR-007)
+    print("\n[TEST] เรียก /draft/questions/interactive ครั้งแรก (หัวข้อ 'นโยบาย PDPA')...")
+    r9 = call_draft_questions_interactive("นโยบาย PDPA", "ต้องระบุประเภทข้อมูลส่วนบุคคลที่เก็บและ DPO")
+    ok9 = "error" not in r9 and len(r9.get("review_topics", [])) > 0
+    results.append(("/draft/questions/interactive ครั้งแรกคืน review_topics ไม่ว่างเปล่า", ok9))
+    if ok9:
+        print(f"   ได้ {len(r9['review_topics'])} คำถามจัดหมวดหมู่ เช่น: "
+              f"{[t['heading'] for t in r9['review_topics'][:2]]}")
+
+        first_q = r9["review_topics"][0]
+        r10 = call_draft_questions_interactive(
+            "นโยบาย PDPA", "ต้องระบุประเภทข้อมูลส่วนบุคคลที่เก็บและ DPO",
+            review_topics=r9["review_topics"], topic_id=first_q["id"],
+        )
+        ok10 = "error" not in r10 and "prefill" in r10
+        results.append(("/draft/questions/interactive คืน prefill ของหัวข้อแรก (ไม่ error)", ok10))
+        if ok10:
+            print(f"   prefill: {str(r10.get('prefill', ''))[:150]}...")
+        else:
+            print(f"   error: {r10.get('error')}")
+    else:
+        print(f"   error: {r9.get('error')}")
+        results.append(("/draft/questions/interactive คืน prefill ของ
