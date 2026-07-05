@@ -22,7 +22,9 @@ Built to work with **any organization**, not tied to a specific company. Just po
 - **💾 Your documents never leave your machine** — Everything runs locally except the call to the Gemini API used to compose the final answer.
 - **📝 Draft new policies with automatic self-review (experimental)** — Not just retrieval: compose a brand-new policy document in one click, grounded in your existing policies for consistency, with an instant report flagging anything worth double-checking before you use it. See details below.
 - **💬 Discuss your draft in chat (same session only)** — After drafting, switch back to regular Q&A mode and ask follow-up questions about it (e.g. "explain section 3 of the draft"). Clearly labeled as unapproved AI-generated content so it never gets confused with real policy.
-- **🔁 Automatic model fallback on quota limits (optional)** — Configure a fallback model in `.env`; if the primary model hits its quota repeatedly, the system automatically retries with the fallback — no manual intervention needed.
+- **📋 Review an existing policy topic-by-topic (experimental)** — Beyond drafting new ones, the system can also *review* a policy that already exists: it automatically maps out the target document's heading structure, suggests related documents worth checking alongside it, then walks through the review one topic at a time with real supporting detail. See details below.
+- **❓ One-at-a-time questions with suggested answers, for both drafting and review** — Both Draft Mode and Review Mode now ask questions one at a time (not a single long form), grouped into categories and more thorough than before. You can go back and revise earlier answers, and before each question the system proposes a likely answer drawn from real documents for you to confirm or edit (Prefill).
+- **🔁 Automatic backup-model fallback on quota limits or long stalls (optional)** — Configure a fallback model in `.env`, with support for a ranked list of several models. If the primary model hits its quota **or takes too long to respond**, the system automatically retries with a backup model — no manual intervention needed.
 
 ---
 
@@ -75,7 +77,7 @@ Normal Q&A mode only answers from what's actually in your documents (to prevent 
 
 **How to use it:** turn on the "📝 Draft Mode (Experimental)" toggle in the sidebar, then follow two steps:
 
-1. Enter the policy topic (and any extra instructions) → click **"❓ Generate Clarifying Questions."** The system compares your topic against existing policies and asks only about what's actually missing (e.g. a "PDPA Policy" topic will trigger questions about what personal data you collect, whether you have a DPO, etc. — things your existing IT/Risk policies don't cover). Answer what you know; skip anything you're unsure about, nothing is required.
+1. Enter the policy topic (and any extra instructions) → click **"❓ Generate Clarifying Questions."** The system compares your topic against existing policies and asks only about what's actually missing (e.g. a "PDPA Policy" topic will trigger questions about what personal data you collect, whether you have a DPO, etc. — things your existing IT/Risk policies don't cover). Questions are now grouped into categories and more thorough than before, asked one at a time (not a single long form) — you can go back and revise earlier answers, and before each question the system proposes a likely answer drawn from real documents for you to confirm or edit (Prefill). Answer what you know; skip anything you're unsure about, nothing is required.
 2. Click **"✅ Confirm Draft."** The system drafts the document from what you provided, then critiques it immediately.
 
 **What you get:**
@@ -91,18 +93,41 @@ Normal Q&A mode only answers from what's actually in your documents (to prevent 
 
 ---
 
-## 🔁 Automatic Model Fallback on Quota Limits (Optional)
+## 📋 Document Review Mode (Experimental)
 
-If heavy usage causes your primary model to hit its quota (429 / RESOURCE_EXHAUSTED) often, configure a fallback model in `.env`:
+Entirely separate from Draft Mode above — use this when you need to **review an existing policy** (not draft a new one). For example, an annual review of the procurement policy, or checking whether an old policy is still consistent with other related documents.
+
+**How to use it:** turn on the "📋 Document Review Mode" toggle in the sidebar, then follow these steps:
+
+1. Choose the target document — upload a file directly (no need to run `build_index.py` first) or pick one already in the system.
+2. The system automatically maps out that document's heading structure (from its real headings), combined with a document-type-specific checklist for anything the document doesn't cover at all, and suggests related documents (cross-reference) for you to confirm or add to.
+3. Work through the review one topic at a time, with the ability to go back — before each topic the system proposes a likely answer drawn from real documents for you to confirm or edit (Prefill, tagged with the effective/last-revised date of the source document so you can judge whether it's still current).
+4. Once every topic is done, the system produces a **change report plus an updated version of the document**, side by side.
+
+**Good to know:**
+- ⚠️ A target document with no clear heading structure (e.g. a scanned-image PDF, or one with no headings at all) will be **rejected, with a suggestion to use Draft Mode instead** — it never silently falls back to a checklist-only review.
+- The output is just a starting point for your team to review further, same as Draft Mode — **it must always be approved by a human before real use**.
+- Progress isn't saved across sessions — closing or refreshing the page mid-review means starting over.
+- Uses the same `GEMINI_MODEL_DRAFT` model as Draft Mode (this task needs more reasoning than plain Q&A).
+
+---
+
+## 🔁 Automatic Backup-Model Fallback on Quota Limits or Long Stalls (Optional)
+
+If heavy usage causes your primary model to hit its quota (429 / RESOURCE_EXHAUSTED) often, **or the primary model responds too slowly and exceeds the configured timeout**, configure a fallback model in `.env` — a ranked list of several models, comma-separated, is supported; the system tries each in order until one succeeds:
 
 ```
-GEMINI_MODEL_CHAT_FALLBACK=gemma-4-26b-a4b-it
-GEMINI_MODEL_DRAFT_FALLBACK=gemma-4-31b-it
+GEMINI_MODEL_CHAT_FALLBACK=gemma-4-26b-a4b-it,gemini-2.5-flash-lite,gemini-3-flash-preview,gemini-2.5-flash
+GEMINI_MODEL_DRAFT_FALLBACK=gemma-4-31b-it,gemma-4-26b-a4b-it,gemini-3-flash-preview,gemini-2.5-flash
 ```
+
+(A single model, as before, still works fine too — e.g. `GEMINI_MODEL_CHAT_FALLBACK=gemma-4-26b-a4b-it` — the system just treats it as a one-item chain.)
 
 ⚠️ **Use the exact model name the Gemini API expects** — Gemma 4 is only reachable through the Gemini API using names with an `-it` suffix (`gemma-4-26b-a4b-it`, `gemma-4-31b-it`). The short form (`gemma-4-26b`) returns `404 NOT_FOUND` immediately.
 
-The system only switches to the fallback **after the primary model has exhausted all 3 retries and is still hitting a quota error** — it never falls back on the first error, and never falls back for non-quota errors. The default is empty, which disables this feature entirely (original behavior unchanged).
+The system switches to a backup model when the primary model **has exhausted all 3 retries and is still hitting a quota error, or has stalled past the configured timeout** — it never falls back for errors unrelated to quota or timeout. The default is empty, which disables this feature entirely (original behavior unchanged).
+
+**Per-request timeout** is configurable via `GEMINI_REQUEST_TIMEOUT_MS` in `.env` (default 5 minutes) — if the primary model doesn't respond within this window, the system cuts it off and tries a backup model (or returns a clear error if none is configured), instead of hanging indefinitely.
 
 **Before relying on this in production — test the fallback model standalone first:**
 ```
