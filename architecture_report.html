@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>Architecture Improvement Report — Policy RAG Assistant</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2f3a; --text: #e6e8ec; --muted: #9aa3b2;
+    --high: #e05252; --medium: #e0a852; --low: #5aa9e0; --code-bg: #10141c; --accent: #6fcf97;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, "Segoe UI", Roboto, "Noto Sans Thai", sans-serif; margin: 0; padding: 40px 20px; line-height: 1.6; }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 1.6em; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); margin-bottom: 28px; font-size: 0.95em; }
+  .summary { display: flex; gap: 12px; margin-bottom: 32px; flex-wrap: wrap; }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; flex: 1; min-width: 140px; }
+  .stat .n { font-size: 1.6em; font-weight: 700; }
+  .stat .l { color: var(--muted); font-size: 0.82em; }
+  .stat.high .n { color: var(--high); } .stat.medium .n { color: var(--medium); } .stat.low .n { color: var(--low); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px 22px; margin-bottom: 18px; }
+  .card-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .badge { font-size: 0.72em; font-weight: 700; padding: 3px 9px; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.03em; }
+  .badge.high { background: rgba(224,82,82,0.15); color: var(--high); border: 1px solid rgba(224,82,82,0.4); }
+  .badge.medium { background: rgba(224,168,82,0.15); color: var(--medium); border: 1px solid rgba(224,168,82,0.4); }
+  .badge.low { background: rgba(90,169,224,0.15); color: var(--low); border: 1px solid rgba(90,169,224,0.4); }
+  .badge.effort { background: rgba(255,255,255,0.06); color: var(--muted); border: 1px solid var(--border); }
+  .card h2 { font-size: 1.05em; margin: 0; }
+  .files { color: var(--muted); font-size: 0.85em; margin-bottom: 12px; }
+  .files code { background: var(--code-bg); padding: 1px 6px; border-radius: 4px; }
+  .section-label { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 14px 0 4px; }
+  .section-label:first-of-type { margin-top: 4px; }
+  pre { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; font-size: 0.85em; margin: 6px 0 0; }
+  code { font-family: "Cascadia Code", "SF Mono", Consolas, monospace; }
+  ul { margin: 4px 0 0; padding-left: 20px; }
+  footer { color: var(--muted); font-size: 0.8em; margin-top: 32px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Architecture Improvement Report</h1>
+  <div class="subtitle">Policy RAG Assistant — สแกนวันที่ 2026-07-03 · Python / http.server / Streamlit / LlamaIndex</div>
+
+  <div class="summary">
+    <div class="stat high"><div class="n">2</div><div class="l">High severity</div></div>
+    <div class="stat medium"><div class="n">2</div><div class="l">Medium severity</div></div>
+    <div class="stat low"><div class="n">2</div><div class="l">Low severity</div></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <span class="badge high">High</span><span class="badge effort">Effort: L</span>
+      <h2>rag_worker.py เป็น god-module — 46 functions + 1 class ในไฟล์เดียว (1,595 บรรทัด)</h2>
+    </div>
+    <div class="files">ไฟล์: <code>rag_worker.py</code></div>
+    <div class="section-label">ปัญหา</div>
+    ไฟล์เดียวรับผิดชอบทุกอย่าง: config/env loading, HTTP routing, prompt engineering (9 ฟังก์ชัน),
+    retrieval, parsing (heading/bullet), LLM fallback logic, session management, และ business logic
+    ของทั้ง 4 ฟีเจอร์ (chat, draft, review, interactive-questions) — ผสมกันในโมดูลเดียวโดยไม่มีขอบเขตชัดเจน
+    ทำให้แก้จุดหนึ่งต้องเลื่อนอ่านไฟล์ 1,500+ บรรทัดเพื่อเข้าใจ context รอบข้าง (สังเกตได้จากเซสชันนี้เอง —
+    ต้อง Grep หาตำแหน่งฟังก์ชันซ้ำหลายรอบเพราะจำไม่ได้ว่าอะไรอยู่ตรงไหน)
+    <div class="section-label">ข้อเสนอ</div>
+    แยกตาม responsibility ที่มีอยู่แล้วตามธรรมชาติของโค้ด (ไม่ต้องออกแบบใหม่ แค่ย้าย):
+    <pre><code>rag_worker/
+  llm_fallback.py   ← _is_quota_error, _is_fallback_worthy_error, _build_llm, _complete_with_fallback
+  retrieval.py      ← _retrieve_context, _retrieve_context_scoped, _nodes_to_context_and_sources
+  parsing.py        ← _parse_markdown_headings, _parse_docx_headings, _parse_bullet_questions,
+                      _parse_categorized_bullets, _get_document_path, _extract_target_document
+  prompts.py        ← 9 ฟังก์ชัน _build_*_prompt (ล้วนเป็น string template ไม่มี dependency กับที่อื่น)
+  handlers.py        ← _handle_chat, _handle_draft, _handle_review_*, _handle_draft_questions_interactive
+  server.py          ← class Handler + main() (HTTP layer บาง เรียก handlers.py เท่านั้น)
+  worker.py           ← entrypoint, _load_everything, _cleanup_idle_sessions, module state</code></pre>
+    <div class="section-label">ทำไมสำคัญตอนนี้</div>
+    เกี่ยวโยงกับ High #2 ด้านล่างโดยตรง — ถ้าไม่แยกไฟล์ก่อน จะ unit-test อะไรใน rag_worker.py แทบไม่ได้เลย
+    เพราะแค่ import ไฟล์นี้ก็ลาก torch/faiss/sentence-transformers เข้ามาทั้งหมด
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <span class="badge high">High</span><span class="badge effort">Effort: S</span>
+      <h2>Fallback logic (llm_fallback) เป็น deep module ที่ดีอยู่แล้ว แต่ติดอยู่ในไฟล์ที่ test ไม่ได้</h2>
+    </div>
+    <div class="files">ไฟล์: <code>rag_worker.py:380-479</code></div>
+    <div class="section-label">ปัญหา</div>
+    <code>_is_quota_error</code> / <code>_is_fallback_worthy_error</code> / <code>_build_llm</code> /
+    <code>_complete_with_fallback</code> ออกแบบมาดีแล้ว (interface เล็ก: <code>complete_with_fallback(model, fallbacks, prompt) → (text, error)</code>,
+    ซ่อน retry/backoff/classification ทั้งหมดไว้ข้างใน) แต่เพราะอยู่ปนกับส่วนที่ต้องโหลด ML model
+    ทั้งไฟล์ ทำให้เขียน unit test แบบ mock exception เพื่อเช็คว่า "timeout ควร trigger fallback"
+    ไม่ได้จริง ๆ (ต้อง boot worker ทั้งตัวถึงจะเทสได้) — นี่คือสาเหตุจริงที่ bug "timeout ไม่ trigger
+    fallback" (แก้ไปแล้วรอบที่แล้ว) ไม่มี test จับได้ตั้งแต่แรก
+    <div class="section-label">ข้อเสนอ</div>
+    ย้าย 4 ฟังก์ชันนี้ไป <code>llm_fallback.py</code> แบบไม่มี import จาก llama_index/torch ที่ top-level
+    (import <code>GoogleGenAI</code> แบบ lazy ข้างในฟังก์ชันเหมือนเดิมได้) แล้วเพิ่ม
+    <code>test_llm_fallback.py</code> แบบ pure unit test (mock exception object ล้วน ๆ ไม่ต้องมี API key
+    หรือโหลดโมเดลเลย) ครอบคลุมเคสที่ scrutinize เจอไปแล้ว: quota error → fallback, timeout → fallback,
+    error อื่น ๆ ที่ไม่เข้าเงื่อนไข → ไม่ fallback
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <span class="badge medium">Medium</span><span class="badge effort">Effort: S</span>
+      <h2>Ready-check boilerplate ซ้ำกัน 7 ครั้งใน Handler class</h2>
+    </div>
+    <div class="files">ไฟล์: <code>rag_worker.py</code> — <code>_handle_chat_request</code>, <code>_handle_clarify_request</code>,
+      <code>_handle_draft_request</code>, <code>_handle_review_target_request</code>,
+      <code>_handle_review_topic_request</code>, <code>_handle_draft_questions_interactive_request</code>,
+      <code>_handle_review_finalize_request</code></div>
+    <div class="section-label">ปัญหา</div>
+    ทุก <code>_handle_*_request</code> method เปิดด้วยแพทเทิร์นเดียวกัน:
+    <pre><code>with _state_lock:
+    ready = _status["status"] == "ready"
+if not ready:
+    self._send_json(503, {"error": "worker ยังโหลดโมเดลไม่เสร็จ"})
+    return</code></pre>
+    เป็น temporal coupling ที่ไม่ได้ enforce ด้วย type system — ถ้ามี endpointใหม่ในอนาคตแล้วลืม copy
+    บล็อกนี้ จะไม่มี error ใดเตือนตอน code review เพราะโค้ดคอมไพล์ผ่านปกติ
+    <div class="section-label">ข้อเสนอ</div>
+    ทำ decorator หรือ method กลาง เช่น <code>self._require_ready() -> bool</code> คืน False + ส่ง 503
+    ให้เอง ลดโค้ดซ้ำ 7 จุดเหลือจุดเดียว และถ้าจะเพิ่ม endpoint ใหม่ก็ inherit พฤติกรรมนี้อัตโนมัติ
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <span class="badge medium">Medium</span><span class="badge effort">M</span>
+      <h2>app.py ผสม worker-process management กับ Streamlit UI ในไฟล์เดียว</h2>
+    </div>
+    <div class="files">ไฟล์: <code>app.py:40-206</code></div>
+    <div class="section-label">ปัญหา</div>
+    <code>_check_worker_health</code>, <code>_start_worker_process</code>, <code>ensure_worker_started</code>,
+    <code>_wait_for_worker_ready</code>, <code>_call_worker_endpoint</code> เป็น infra logic ที่ไม่เกี่ยวกับ
+    UI เลย (เป็น deep module ที่ดีอยู่แล้ว: interface เล็ก <code>ensure_worker_started() -> bool</code>)
+    แต่อยู่ปนกับโค้ด Streamlit ทำให้ทดสอบ process-management logic แยกจาก UI ไม่ได้ ต้อง import streamlit
+    ทั้งชุดถึงจะทดสอบ subprocess-launch behavior ได้
+    <div class="section-label">ข้อเสนอ</div>
+    แยกเป็น <code>worker_client.py</code> (ไม่ import streamlit เลย) ให้ app.py import มาใช้แค่ UI layer
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <span class="badge low">Low</span><span class="badge effort">S</span>
+      <h2>9 prompt-builder functions กระจายอยู่ทั่วไฟล์ ไม่รวมกลุ่ม</h2>
+    </div>
+    <div class="files">ไฟล์: <code>rag_worker.py</code> — <code>_build_sys_prompt</code>, <code>_build_draft_sys_prompt</code>,
+      <code>_build_clarify_questions_prompt</code>, <code>_build_scrutinize_sys_prompt</code>,
+      <code>_build_review_checklist_prompt</code>, <code>_build_prefill_sys_prompt</code>,
+      <code>_build_followup_sys_prompt</code>, <code>_build_draft_categorized_questions_prompt</code>,
+      <code>_build_review_finalize_prompt</code></div>
+    <div class="section-label">ปัญหา</div>
+    ฟังก์ชันเหล่านี้เป็น string template ล้วน ๆ ไม่มี logic ซับซ้อน ไม่ใช่ปัญหาเชิง "shallow module"
+    จริง ๆ (การมี interface เล็ก + logic น้อยของฟังก์ชัน pure-template เป็นเรื่องปกติ) แต่การกระจายอยู่ทั่ว
+    ไฟล์ 1,595 บรรทัดทำให้หายาก เวลาจะแก้ system prompt สักจุดต้อง grep หาก่อนทุกครั้ง
+    <div class="section-label">ข้อเสนอ</div>
+    ย้ายไปรวมใน <code>prompts.py</code> เดียว (เกี่ยวกับ High #1 ด้านบน) — ไม่เร่งด่วน ทำพร้อมกับตอนแยกไฟล์ใหญ่ก็ได้
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <span class="badge low">Low</span><span class="badge effort">M</span>
+      <h2>Global mutable state เข้าถึงได้ตรง ๆ จากทุกฟังก์ชัน ไม่ผ่าน accessor</h2>
+    </div>
+    <div class="files">ไฟล์: <code>rag_worker.py</code> — <code>_index</code>, <code>_reranker</code>, <code>_sessions</code>,
+      <code>_session_last_used</code>, <code>_status</code> + 3 locks (<code>_state_lock</code>,
+      <code>_sessions_lock</code>, <code>_log_lock</code>)</div>
+    <div class="section-label">ปัญหา</div>
+    Locking ทำถูกต้องอยู่แล้วทุกจุดที่ตรวจสอบ (ยืนยันจาก /scrutinize รอบก่อน) แต่การเข้าถึง global
+    โดยตรงจากทุกฟังก์ชันหมายความว่าไม่มีจุดเดียวที่บังคับให้โค้ดใหม่ต้อง lock — ขึ้นอยู่กับวินัยของคนเขียน
+    โค้ดถัดไปทั้งหมด
+    <div class="section-label">ข้อเสนอ</div>
+    ไม่เร่งด่วนเพราะปัจจุบันไม่มีบั๊กจากจุดนี้ แต่ถ้าจะรีแฟกเตอร์รอบใหญ่ (High #1) ให้พิจารณาห่อ session
+    state ไว้ใน class เล็ก ๆ (เช่น <code>SessionStore</code> ที่ lock ให้เองใน method) แทนการเข้าถึง
+    dict + lock ตรง ๆ จากข้างนอก
+  </div>
+
+  <footer>
+    Generated by /improve-codebase-architecture · แนะนำให้เลือก 1 opportunity แล้วใช้ /grill-with-docs
+    เพื่อ clarify scope ก่อน refactor ด้วย /tdd
+  </footer>
+</div>
+</body>
+</html>
