@@ -1,4 +1,141 @@
-# Handoff — Policy RAG Assistant (2026-07-03)
+# Handoff — Policy RAG Assistant (2026-07-03, ปรับปรุงล่าสุด 2026-07-05)
+
+## 0b. Update ล่าสุดสุด (2026-07-05 — live test บนเครื่องจริงยืนยันผ่านแล้ว) ← อ่านส่วนนี้ก่อน
+
+ผู้ใช้รัน `venv\Scripts\python.exe test_rag_pipeline.py` บนเครื่องจริง (Windows) — **ผล 11/11 PASS
+ทั้งหมด** รวมถึง `/review/target` กับเอกสาร IT Risk จริงจาก corpus (ได้ 23 หัวข้อรีวิว) ที่เคย
+timeout ตอนทดสอบครั้งก่อน (ดู "0. Update" ข้อ 1 ด้านล่าง) — **ยืนยันแล้วว่า `GEMINI_REQUEST_TIMEOUT_MS`
+fix ใช้งานได้จริง ไม่ใช่แค่ static verify**
+
+worker ที่ test เรียกใช้คือโค้ดปัจจุบันในโฟลเดอร์ (หลัง architecture refactor ใน "0a" ด้านล่าง — ยัง
+ไม่ commit ตอนรันเทสนี้) ดังนั้น run นี้ **ยืนยัน live test ของ "0a" ไปด้วยในตัว** (worker start +
+ทุก endpoint ทำงานถูกต้องหลัง split module) แม้จะไม่ได้แยกรัน `test_llm_fallback.py`/
+`test_session_store.py` บน Windows ตรงๆ (สองไฟล์นี้ผ่าน sandbox แล้ว และ E2E นี้ครอบคลุมการทำงาน
+ร่วมกันจริงของทุก module ที่ทั้งสองไฟล์ทดสอบแยกส่วน)
+
+### Resolved จากการรันนี้
+- ✅ ADR-006/ADR-007 timeout bug (`GEMINI_REQUEST_TIMEOUT_MS`) — ยืนยันแก้ได้จริง
+- ✅ Architecture refactor 6 ข้อใน "0a" — worker start + ทุก endpoint ทำงานถูกต้องหลัง split module
+
+### ยังไม่ resolved / ต้องทำต่อ
+1. **โค้ด architecture refactor (`worker_*.py` ใหม่ทั้งหมด + `rag_worker.py`/`app.py` ที่แก้) ยังไม่
+   commit** — ผ่าน live test แล้ว ควร `git add`/commit ทั้งชุดตาม "Key Files" ใน "0a"
+2. **แก้ไขข้อความที่ผิดในเอกสารนี้เอง**: ส่วน "0" ข้อ 6 ด้านล่างเคยอ้างว่า `generate_docx.py` fix
+   "ยังไม่ได้ commit" — **ไม่จริง**, เช็คกับ `git log` แล้วพบว่า commit ไปแล้วตั้งแต่ `e5cd6f3`/`83bd90b`
+   (ก่อน commit ADR-006/007 เสียอีก) ไม่ต้องทำอะไรกับไฟล์นั้นซ้ำ (ดูหมายเหตุแก้ไขในข้อ 6 ด้านล่างด้วย)
+3. **5-model fallback chain ไม่เคยถูกบันทึกไว้ในเอกสารนี้เลย** จนถึงตอนนี้ — `GEMINI_MODEL_CHAT_FALLBACK`/
+   `GEMINI_MODEL_DRAFT_FALLBACK` เปลี่ยนจากโมเดลเดียวเป็น comma-separated list (4 โมเดล ไล่ทีละตัว)
+   ตั้งแต่ commit `fb9abeb` (`_parse_model_chain()` ใน `worker_config.py`) ตัวอย่างค่าจริงใน
+   `.env.example`: `GEMINI_MODEL_CHAT_FALLBACK=gemma-4-26b-a4b-it,gemini-2.5-flash-lite,gemini-3-flash-preview,gemini-2.5-flash`
+   — ควรเพิ่มคำอธิบายลง README ให้คนอ่านเข้าใจ (ตอนนี้อธิบายแค่ใน code comment)
+4. **`/chat` (`_handle_chat` ใน `worker_handlers.py`) มี retry+fallback logic แยกเป็นของตัวเอง ไม่ผ่าน
+   `_complete_with_fallback`/`llm_fallback.complete_with_fallback` ที่มี 25 unit tests คุ้ม** — ใช้
+   `_build_llm()` เหมือนกัน (ได้ `GEMINI_REQUEST_TIMEOUT_MS` ถูกต้อง) แต่ loop ไล่โมเดลสำรอง
+   (บรรทัด ~94-111) เขียนเองแยกต่างหาก เพราะต้องผูกกับ `chat_engine.chat()`/session memory ไม่ใช่
+   LLM.complete() ตรงๆ แบบ handler อื่น — อ่านโค้ดแล้วทำงานถูกต้องตอนนี้ (retry primary เฉพาะ quota
+   error, escalate ไป fallback chain เมื่อ fallback-worthy) แต่**ไม่มี unit test คุ้มเส้นทางนี้โดยตรง**
+   ถ้าแก้ `_handle_chat` ในอนาคต บั๊ก ADR-003 เดิม (retry primary ตอน timeout) อาจกลับมาได้โดยไม่มีเทส
+   จับ — ควรพิจารณา refactor ให้ `_handle_chat` เรียก `_complete_with_fallback` ด้วย หรืออย่างน้อย
+   เพิ่ม unit test เฉพาะ loop นี้
+
+---
+
+## 0a. Update (2026-07-03 — Architecture refactor session)
+
+### Goal
+
+Execute ทั้ง 6 issues จาก `architecture_report.html` (ผลของ /improve-codebase-architecture):
+แยก god-module `rag_worker.py`, ทำ fallback logic ให้ unit-test ได้, dedupe ready-check,
+แยก worker-client infra ออกจาก Streamlit UI, ห่อ session state — **ทั้งหมดเป็น pure move
+ไม่เปลี่ยนพฤติกรรม**
+
+### Current State — ทั้ง 6 ข้อ DONE (verify ใน sandbox ผ่านแล้ว, **live test บนเครื่องจริงยืนยันผ่านแล้ว
+2026-07-05 — ดู "0b" ด้านบน**)
+
+**รอบ 1 (High #1 + #2):** แยก `rag_worker.py` (1,596 บรรทัด) เป็น flat modules
+(**ตั้งใจไม่ทำเป็น package `rag_worker/`** — app.py launch `rag_worker.py` เป็น WORKER_SCRIPT
+ผ่าน subprocess ชื่อ entrypoint ต้องคงเดิม):
+
+- `rag_worker.py` (~430 บรรทัด) — entrypoint: API-key check, `import faiss`, `_load_everything()`,
+  `_cleanup_idle_sessions()`, `class Handler`, `main()`
+- `worker_config.py` — .env loading + OMP/HF env side effects + ค่าคงที่ทั้งหมด
+  (**ตั้งใจไม่เช็ค GOOGLE_API_KEY ที่นี่** เพื่อให้ test import ได้ — การ raise ย้ายไปต้น rag_worker.py
+  พฤติกรรมตอน start เหมือนเดิม)
+- `worker_state.py` — `log()`, `_state_lock`/`_status`/`_index`/`_reranker`/`_sys_prompt`,
+  `SessionStore` + singleton `sessions`
+- `worker_prompts.py` — prompt builders ทั้ง 9 + `_get_available_documents` +
+  `REVIEW_FINALIZE_SENTINEL` (rename จาก `_REVIEW_FINALIZE_SENTINEL`)
+- `worker_parsing.py` — parsers ทั้งหมด + `_get_document_path` + `_extract_target_document`
+- `worker_retrieval.py` — `_retrieve_context` / `_retrieve_context_scoped` / `_nodes_to_context_and_sources`
+- `worker_handlers.py` — `_handle_*` ทั้งหมด + wrapper `_build_llm(model)` /
+  `_complete_with_fallback(4 args)` ที่เติม timeout/log จาก config/state เอง (call sites ไม่เปลี่ยน signature)
+- `llm_fallback.py` — pure module: `is_quota_error`, `is_fallback_worthy_error`,
+  `build_llm(model, timeout_ms)`, `complete_with_fallback(..., *, timeout_ms, log, sleep, llm_factory)`
+  — keyword-only params มีไว้ inject ใน test เท่านั้น
+- `test_llm_fallback.py` — 25 pure unit tests (stdlib unittest) รวม regression test
+  "timeout → fallback โดยไม่ retry primary" (บั๊ก ADR-003 เดิม)
+
+**รอบ 2 (Medium #1, #2 + Low #2):**
+
+- Medium #1: ready-check ซ้ำ 7 จุดใน Handler → `_require_ready()` method เดียว (ส่ง 503 เอง คืน bool)
+- Medium #2: สร้าง `worker_client.py` (ไม่ import streamlit): `_check_worker_health`,
+  `_start_worker_process`, `ensure_worker_started`, `_call_worker_endpoint` + `_call_worker_*` ทุกตัว
+  — app.py import **ด้วยชื่อ underscore เดิม** ทำให้ UI call sites ไม่ต้องแก้เลย
+  `_wait_for_worker_ready` คงอยู่ app.py (เป็น UI: วาด placeholder/st.stop) ลบ import
+  `sys`/`subprocess`/`urllib.*` ที่ไม่ใช้แล้วออกจาก app.py
+- Low #2: globals `_sessions`/`_session_last_used`/`_sessions_lock` → `class SessionStore`
+  (lock ในตัวทุก method: `get_or_create(session_id, factory)` create+touch ใต้ lock เดียว,
+  `cleanup_idle(timeout)` คืน expired ids) ผู้ใช้ที่แก้: `_handle_chat`, `_inject_draft_into_session`
+  (worker_handlers), `_cleanup_idle_sessions` (rag_worker) + `test_session_store.py` 5 tests
+  (รวม race test 8 threads)
+- Low #1 (รวม prompts) นับว่าเสร็จโดย `worker_prompts.py` ตั้งแต่รอบ 1
+
+**Verification ที่ทำแล้ว (Linux sandbox, Python 3.10, ไม่มี project deps):**
+py_compile 12 ไฟล์ ✓, unittest 30/30 ✓, import chain โดยไม่มี API key ✓, no-API-key guard
+ยัง raise ตอน import rag_worker ✓, pyflakes สะอาด (เหลือแค่ `faiss` unused ซึ่ง intentional มี noqa) ✓,
+ไม่มี reference ตกค้างของ session globals เดิม ✓
+
+### Next Steps (ต่อจากนี้)
+
+1. **ผู้ใช้ต้องรัน live test บน Windows** (sandbox ทำไม่ได้ — ไม่มี venv/โมเดล/API key):
+   - stop worker เก่าก่อน (stop_worker.bat หรือ kill port 8765) ให้โค้ดใหม่โหลด
+   - `venv\Scripts\python.exe test_llm_fallback.py`
+   - `venv\Scripts\python.exe test_session_store.py`
+   - `venv\Scripts\python.exe test_rag_pipeline.py` (end-to-end — ครอบคลุม endpoint ทั้งหมด
+     **และเป็นการยืนยันข้อค้างเดิมจากข้อ 0 ด้านล่างไปในตัว**)
+   - เปิด Streamlit ตามปกติ ยืนยัน worker_client auto-start + UI ทั้ง 4 โหมดทำงาน
+2. ถ้าผ่าน: รัน /improve-codebase-architecture ซ้ำเพื่อยืนยันว่า findings เคลียร์แล้ว (optional)
+3. ลบ `.sync_probe_2.txt` (ไฟล์ทดสอบ sync ของ sandbox — ลบจาก sandbox ไม่ได้)
+
+### Open Questions / Blockers
+
+- ~~ผล live test ยังไม่รู้~~ **ยืนยันแล้ว 2026-07-05 — `test_rag_pipeline.py` 11/11 PASS บนเครื่องจริง
+  ดู "0b" ด้านบน**
+- `test_rag_pipeline.py` มี health-check/start-worker helpers ของตัวเอง ซ้ำกับ `worker_client.py`
+  — reuse ได้แต่**ยังไม่ได้ทำ** (นอก scope อย่าแตะถ้าไม่ได้ขอ)
+
+### Constraints ที่ agent ถัดไปต้องรู้ (เพิ่มจาก invariants เดิมในเอกสารนี้)
+
+- state ที่ rebind ได้ (`_index`/`_reranker`/`_sys_prompt`) ต้องอ้างเป็น `state.X` ที่ call time เสมอ
+  ห้าม `from worker_state import _index` (จะได้ None ค้าง)
+- `worker_config` ต้องถูก import ก่อน `import faiss` และ faiss ก่อน torch เสมอ /
+  llama_index/torch imports ใน functions เป็น lazy โดยตั้งใจ ห้าม hoist ขึ้น top-level
+- convention: docstring/comment/log ภาษาไทย, module ชื่อ `worker_*` แบบ flat, test ใช้ stdlib
+  unittest (ไม่ใช่ pytest), คงชื่อ underscore เดิมข้าม module เพื่อลด diff
+- **Sandbox mount gotchas** (สำคัญถ้า verify ในสภาพแวดล้อมนี้อีก): mount ที่
+  `/sessions/.../mnt/Local  RAG/` sync ไฟล์*ใหม่*เร็ว แต่ไฟล์*ที่แก้ทับ* lag —
+  ไฟล์ที่*หดลง*เหลือ NUL bytes ท้ายไฟล์ (แก้ด้วย `tr -d '\000'`), ไฟล์ที่*โตขึ้น*โดน
+  **truncate ที่ขนาดเดิม** (ต้อง reconstruct ใน /tmp เอง) — เช็ค integrity (UTF-8 decode +
+  marker grep) ก่อนรันเทสจาก mount เสมอ; ไฟล์จริงฝั่ง Windows (ผ่าน Read/Grep tools) คือ source of truth
+
+### Key Files
+
+`rag_worker.py`, `worker_handlers.py`, `llm_fallback.py`+`test_llm_fallback.py`,
+`worker_state.py`+`test_session_store.py`, `worker_client.py`, `app.py`,
+`worker_config.py`/`worker_prompts.py`/`worker_parsing.py`/`worker_retrieval.py`,
+`test_rag_pipeline.py` (ไม่ได้แตะ), `architecture_report.html` (ต้นเรื่อง — ครบ 6 ข้อแล้ว)
+
+---
 
 ## 0. Update (2026-07-03, later same day — implementation session)
 
@@ -24,9 +161,9 @@ ADR-006 และ ADR-007 ที่อธิบายไว้ในเอกส
    request timeout ไว้เลยตั้งแต่ ADR-001 (ดู ADR.md ADR-003 "หมายเหตุเพิ่มเติม 2026-07-03" สำหรับ
    รายละเอียดเต็ม) แก้แล้วด้วย `GEMINI_REQUEST_TIMEOUT_MS` (ดีฟอลต์ 5 นาที) ผ่าน helper กลาง
    `_build_llm()` + ปรับ client timeout ใน `app.py`/`test_rag_pipeline.py` ให้กว้างกว่าตามไปด้วย —
-   **ยังไม่ได้รัน `test_rag_pipeline.py` ซ้ำเพื่อยืนยันว่าแก้ได้จริง** ต้องรัน
-   `venv\Scripts\python.exe test_rag_pipeline.py` อีกครั้งก่อนเชื่อว่าโหมดรีวิวเอกสารใช้งานได้จริง
-   (เทสต์ที่เหลือ 9 ข้อ รวมถึง 1-6 เดิมทั้งหมด ผ่านหมดในรันแรกแล้ว ไม่ต้องกังวลเรื่องนั้น)
+   ~~ยังไม่ได้รัน `test_rag_pipeline.py` ซ้ำเพื่อยืนยันว่าแก้ได้จริง~~ **ยืนยันแล้ว 2026-07-05:
+   รันซ้ำบนเครื่องจริง 11/11 PASS รวม `/review/target` กับเอกสารจริงที่เคย timeout — แก้ได้จริง
+   ดู "0b" ด้านบน**
 2. **Design decision ที่ควรรู้ก่อนรีวิวโค้ด**: `FaissVectorStore` (venv ปัจจุบัน) ไม่รองรับ
    metadata filters ที่ query() เลย (`raise ValueError`) จึง implement **Cross-reference retrieval**
    (ADR-006) เป็น application-level filter แทน (over-fetch `similarity_top_k=200` แล้วกรอง
@@ -43,8 +180,10 @@ ADR-006 และ ADR-007 ที่อธิบายไว้ในเอกส
    document ตาม ADR-006 ข้อ 6) ไม่ได้อยู่ในตัวอย่าง endpoint ที่ ADR-006 ข้อ 9 ยกไว้ (ยกแค่
    `/review/target`/`/review/topic`) แต่จำเป็นต่อผลลัพธ์ที่ตัดสินใจไว้ — ควรพิจารณาเพิ่มเป็นเอกสาร
    ADR-006 ข้อ 9 อย่างเป็นทางการถ้าตรวจสอบแล้วว่าถูกต้อง
-6. **`generate_docx.py` table-rendering fix + README update ที่ค้างจาก session ก่อนหน้า
-   (ดูส่วน "Next Steps" ข้อ 1 ด้านล่าง) ยังไม่ได้ commit** — ไม่เกี่ยวกับงานเซสชันนี้ แค่ยังค้างอยู่เหมือนเดิม
+6. ~~`generate_docx.py` table-rendering fix + README update ที่ค้างจาก session ก่อนหน้า
+   (ดูส่วน "Next Steps" ข้อ 1 ด้านล่าง) ยังไม่ได้ commit~~ **แก้ไข 2026-07-05: อ้างผิด — เช็ค `git log`
+   แล้วพบว่า commit ไปแล้วจริง (`e5cd6f3` docx fix, `83bd90b` README) ตั้งแต่ก่อน commit ADR-006/007
+   (`fb9abeb`) เสียอีก ไม่ต้อง commit ซ้ำ ดู "0b" ด้านบน**
 
 ส่วนที่เหลือของเอกสารนี้ (ข้อ 1-6 ด้านล่าง) เป็นบริบทเดิมตอนเริ่มงาน เก็บไว้เพื่ออ้างอิงว่าทำไมถึง
 ตัดสินใจแบบนี้ — งานที่อธิบายไว้ใน "Next Steps" เดิมข้อ 3(a)-(f) ทำเสร็จหมดแล้วยกเว้นการรันเทสต์จริง
@@ -76,14 +215,10 @@ Both went through `/scrutinize` **4 times** (each round found real issues, all f
 
 ## 3. Next Steps
 
-1. **Commit the still-uncommitted fixes first** (exact commands for the user's PowerShell):
-   ```
-   git add generate_docx.py
-   git commit -m "fix: render markdown tables as real docx tables instead of literal pipe text"
-   git add README_MANAGEMENT.md README_MANAGEMENT_EN.md
-   git commit -m "docs: update leadership README to v2.1 (fallback verified, session cleanup, docx highlighting)"
-   git push
-   ```
+1. ~~**Commit the still-uncommitted fixes first**~~ **Stale as of 2026-07-05 — these were already
+   committed** (`e5cd6f3`, `83bd90b`, confirmed via `git log`), no action needed here. What's
+   actually uncommitted right now is the architecture-refactor split (`worker_*.py` new files +
+   modified `rag_worker.py`/`app.py`) from section "0a" — see "0b" above for what to commit instead.
 2. **Read `ADR.md` ADR-006 and ADR-007 in full** (this handoff is a summary, the ADRs have the actual decisions with rationale).
 3. **Implement in this order** (ADR-006 first, ADR-007 reuses its plumbing):
    a. `build_index.py` + `rag_worker.py`: add metadata filtering to the retriever so **Cross-reference retrieval** can be scoped to a specific file list (doesn't exist today — retrieval is always corpus-wide).
