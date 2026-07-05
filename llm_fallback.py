@@ -86,6 +86,86 @@ def build_llm(model: str, timeout_ms: int = _DEFAULT_TIMEOUT_MS):
     )
 
 
+def run_with_fallback(
+    primary_model: str,
+    fallback_models: list[str],
+    factory,
+    call,
+    log_prefix: str,
+    *,
+    log=print,
+    sleep=None,
+) -> tuple[object | None, Exception | None]:
+    """ตรรกะ retry+fallback กลาง (ดู ADR-003, แยกออกมาเพิ่มเติม 2026-07-05) — แยก "จะเรียกโมเดลไหน
+    ตามลำดับไหน เมื่อไหร่ต้อง retry/เมื่อไหร่ต้อง fallback" (ฟังก์ชันนี้ ไม่รู้จัก prompt หรือรูปแบบ
+    ผลลัพธ์เลย) ออกจาก "เรียกโมเดลนั้นยังไงและเอาผลลัพธ์อะไรออกมา" (factory/call ที่ผู้เรียกกำหนดเอง)
+
+    เหตุผล: ก่อนหน้านี้ `_handle_chat` ใน worker_handlers.py เขียน retry+fallback loop เองแยกต่างหาก
+    ทั้งหมด (เพราะใช้ `chat_engine.chat()` แทน `llm.complete()`) ทำให้มีตรรกะเดียวกันซ้ำอยู่ 2 ที่ —
+    ที่หนึ่งมี unit test คุ้ม 25 เทส (complete_with_fallback ด้านล่าง) อีกที่ไม่มีเทสคุ้มเลย
+    (ดู HANDOFF.md "0b" ข้อ 4) ตอนนี้ complete_with_fallback() เป็นแค่ wrapper บางๆ ของฟังก์ชันนี้
+    และ `_handle_chat` เรียกฟังก์ชันนี้ตรงๆ ด้วย — ทำให้ทั้งสอง path ใช้ตรรกะเดียวกันที่มีเทสคุ้มแล้ว
+    โดยอัตโนมัติ ไม่มีโอกาสที่สองที่จะ diverge กันอีกเหมือนที่เคยเกิดบั๊ก ADR-003 เดิม (retry primary
+    ตอน timeout — แก้แล้วที่นี่ที่เดียว ใช้ร่วมกันทั้งคู่)
+
+    factory(model): callable สร้าง object ใหม่ (llm หรือ chat_engine) — เรียกใหม่ทุกครั้งที่ attempt
+    รวมถึงตอน retry โมเดลหลักซ้ำด้วย (ไม่ใช่แค่ตอนสลับโมเดล) ปลอดภัยเสมอ (ยืนยันจาก diagnostic tests
+    เดิมของ `_build_chat_engine` ใน worker_handlers.py)
+    call(obj): callable เรียกจริงบน object ที่ได้จาก factory คืนผลลัพธ์ หรือ raise ถ้าล้มเหลว
+
+    พฤติกรรม retry (3 ครั้ง + backoff 10s/20s เฉพาะ quota error)/fallback (ไล่ทีละโมเดลตามลำดับใน
+    fallback_models จนกว่าจะสำเร็จหรือหมดรายการ ไม่ retry ซ้ำต่อโมเดลสำรอง) เหมือน complete_with_fallback
+    เดิมทุกประการ คืนค่า (result, error) โดย result เป็น None ถ้าทุกโมเดลล้มเหลว
+
+    หมายเหตุ (2026-07-05, พบระหว่างเขียน test_handle_chat_fallback.py): sleep ดีฟอลต์เป็น None แล้ว
+    resolve เป็น time.sleep จริงข้างในฟังก์ชัน (ไม่ใช่ sleep=time.sleep ตรงๆ ที่ signature) เพราะถ้า
+    bind ค่า time.sleep ไว้ตรงๆ ตอน def (ตอน import โมดูลนี้) การ monkeypatch time.sleep ในเทสภายหลัง
+    (เช่น `time.sleep = lambda s: ...`) จะไม่มีผลเลย — ค่า default ที่ bind ไว้แล้วเป็นคนละ object กับ
+    time.sleep ตัวใหม่ที่ถูกแทนที่ ทำให้เทสที่ผ่าน _handle_chat (เรียกฟังก์ชันนี้ตรงๆ โดยไม่ส่ง sleep
+    มาเอง) ต้องรอ backoff จริง 10s+20s ทุกครั้งที่รันเทส (ยืนยันจาก timestamp ใน log จริงตอนรันเทส
+    ก่อนแก้จุดนี้) resolve แบบ lazy ข้างในฟังก์ชันแทน ทำให้ monkeypatch ทำงานถูกต้อง พฤติกรรมจริง
+    (ไม่ inject sleep เอง) ไม่เปลี่ยนเลย เพราะ time.sleep ที่ resolve ได้ก็คือตัวเดียวกันอยู่ดี"""
+    if sleep is None:
+        sleep = time.sleep
+    last_error = None
+    for attempt in range(3):
+        try:
+            t0 = time.time()
+            result = call(factory(primary_model))
+            log(f"{log_prefix} สำเร็จใน {time.time() - t0:.2f}s (โมเดล: {primary_model})")
+            return result, None
+        except Exception as e:
+            last_error = e
+            log(f"{log_prefix} error (โมเดล {primary_model}): {type(e).__name__} - {e}")
+            if is_quota_error(e) and attempt < 2:
+                sleep(10 * (attempt + 1))
+                continue
+            break
+
+    if fallback_models and is_fallback_worthy_error(last_error):
+        # หมายเหตุ (2026-07-05, พบระหว่าง /scrutinize + debug-mantra repro): เดิม log บรรทัดถัดไปนี้
+        # hardcode ชื่อ primary_model และคำว่า "ชนโควตา" ตลอดทุกรอบของ loop — ผิดตั้งแต่ fallback ตัว
+        # ที่ 2 เป็นต้นไป (โมเดลที่เพิ่ง fail จริงคือ fallback ตัวก่อนหน้า ไม่ใช่ primary) และผิดเมื่อ
+        # error ไม่ใช่ quota เลย (เข้า branch นี้ผ่าน is_fallback_worthy_error ซึ่งครอบคลุม timeout/503/504
+        # ด้วย ไม่ใช่แค่ quota) track โมเดล+ประเภท error ที่เพิ่ง fail จริงแทน กันสับสนตอนอ่าน log จริง
+        failed_model = primary_model
+        for fallback_model in fallback_models:
+            try:
+                log(f"{log_prefix} โมเดล {failed_model} ใช้ไม่ได้ ({type(last_error).__name__}) "
+                    f"กำลังลองโมเดลสำรอง {fallback_model}...")
+                t0 = time.time()
+                result = call(factory(fallback_model))
+                log(f"{log_prefix} สำเร็จใน {time.time() - t0:.2f}s (โมเดลสำรอง: {fallback_model})")
+                return result, None
+            except Exception as e:
+                last_error = e
+                failed_model = fallback_model
+                log(f"{log_prefix} error (โมเดลสำรอง {fallback_model}): {type(e).__name__} - {e}")
+                continue
+
+    return None, last_error
+
+
 def complete_with_fallback(
     primary_model: str,
     fallback_models: list[str],
@@ -104,39 +184,15 @@ def complete_with_fallback(
     ตัวหนึ่ง error (ไม่ว่าประเภทไหน) ไปลองตัวถัดไปในรายการต่อทันที ไม่หยุดกลางคัน เพราะโมเดลสำรอง
     แต่ละตัวเป็นอิสระจากกัน error ของตัวหนึ่งไม่ได้แปลว่าตัวถัดไปจะพังด้วย
     (ดู ADR-003 — ขยายจาก "โมเดลสำรอง 1 ตัว" เป็น "รายการโมเดลสำรอง" ในหมายเหตุ 2026-07-03)
-    คืนค่า (text, error) โดย text เป็น None ถ้าทุกโมเดลล้มเหลว
+    คืนค่า (text, error) โดย text เป็น None ถ้าทุกโมเดลล้มเหลว — ตอนนี้เป็นแค่ wrapper บางๆ ของ
+    run_with_fallback() ด้านบน (ดู docstring ของฟังก์ชันนั้นสำหรับเหตุผลที่แยกออกมา 2026-07-05)
+    พฤติกรรม/signature เดิมทุกประการ ไม่กระทบ caller เดิมเลย
 
     พารามิเตอร์ keyword-only ทั้งหมดมีไว้เพื่อ dependency injection ใน unit test เท่านั้น
     (llm_factory: callable(model) -> llm ที่มี .complete(prompt) -> obj ที่มี .text) —
     โค้ดจริงใน worker ส่งแค่ timeout_ms กับ log มา ที่เหลือใช้ค่าดีฟอลต์"""
     factory = llm_factory or (lambda m: build_llm(m, timeout_ms))
-
-    last_error = None
-    for attempt in range(3):
-        try:
-            t0 = time.time()
-            resp = factory(primary_model).complete(prompt)
-            log(f"{log_prefix} สำเร็จใน {time.time() - t0:.2f}s (โมเดล: {primary_model})")
-            return resp.text, None
-        except Exception as e:
-            last_error = e
-            log(f"{log_prefix} error (โมเดล {primary_model}): {type(e).__name__} - {e}")
-            if is_quota_error(e) and attempt < 2:
-                sleep(10 * (attempt + 1))
-                continue
-            break
-
-    if fallback_models and is_fallback_worthy_error(last_error):
-        for fallback_model in fallback_models:
-            try:
-                log(f"{log_prefix} โมเดล {primary_model} ชนโควตา กำลังลองโมเดลสำรอง {fallback_model}...")
-                t0 = time.time()
-                resp = factory(fallback_model).complete(prompt)
-                log(f"{log_prefix} สำเร็จใน {time.time() - t0:.2f}s (โมเดลสำรอง: {fallback_model})")
-                return resp.text, None
-            except Exception as e:
-                last_error = e
-                log(f"{log_prefix} error (โมเดลสำรอง {fallback_model}): {type(e).__name__} - {e}")
-                continue
-
-    return None, last_error
+    return run_with_fallback(
+        primary_model, fallback_models, factory, lambda llm: llm.complete(prompt).text,
+        log_prefix, log=log, sleep=sleep,
+    )

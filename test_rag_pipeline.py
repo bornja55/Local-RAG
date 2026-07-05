@@ -37,6 +37,10 @@ import subprocess
 import urllib.request
 import urllib.error
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import worker_config as config  # noqa: E402 — reuse GEMINI_REQUEST_TIMEOUT_MS/fallback lists เดียว
+from worker_client import _worst_case_timeout_seconds  # noqa: E402
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKER_SCRIPT = os.path.join(BASE_DIR, "rag_worker.py")
 WORKER_URL = "http://127.0.0.1:8765"
@@ -113,34 +117,40 @@ def _post(path: str, payload: dict, timeout: int) -> dict:
 
 
 def call_chat(session_id: str, prompt: str) -> dict:
-    return _post("/chat", {"session_id": session_id, "prompt": prompt}, timeout=120)
+    timeout = _worst_case_timeout_seconds(1, config.GEMINI_MODEL_CHAT_FALLBACK)
+    return _post("/chat", {"session_id": session_id, "prompt": prompt}, timeout=timeout)
 
 
 def call_clarify_questions(topic: str, instructions: str = "") -> dict:
-    """เรียก /draft/questions — ขั้นตอนสร้างคำถามเพิ่มเติมก่อนร่าง (ดู ADR-002)"""
-    return _post("/draft/questions", {"topic": topic, "instructions": instructions}, timeout=60)
+    """เรียก /draft/questions — ขั้นตอนสร้างคำถามเพิ่มเติมก่อนร่าง (ดู ADR-002) ใช้
+    GEMINI_MODEL_CHAT(_FALLBACK) เหมือน _handle_clarify_questions จริง"""
+    timeout = _worst_case_timeout_seconds(1, config.GEMINI_MODEL_CHAT_FALLBACK)
+    return _post("/draft/questions", {"topic": topic, "instructions": instructions}, timeout=timeout)
 
 
 def call_draft(
     topic: str, instructions: str = "", answers: dict | None = None, session_id: str | None = None
 ) -> dict:
-    """เรียก /draft — ใช้ GEMINI_MODEL_DRAFT และเรียก LLM 2 ครั้งต่อคำขอ (ร่าง + scrutinize)
-    จึง timeout ยาวกว่า call_chat() — worker จำกัด 1 LLM call ไว้ไม่เกิน GEMINI_REQUEST_TIMEOUT_MS
-    (ดีฟอลต์ 5 นาที) ต่อครั้ง client timeout จึงตั้งกว้างกว่านั้นพอสมควรเผื่อกรณีเลวร้ายที่สุด
+    """เรียก /draft — ใช้ GEMINI_MODEL_DRAFT และเรียก LLM 2 ครั้งทางตรรกะต่อคำขอ (ร่าง + scrutinize)
+    แต่ละครั้งอาจไล่ลอง GEMINI_MODEL_DRAFT_FALLBACK เต็มรายการ (ดู worker_client._worst_case_timeout_seconds
+    — ใช้สูตรเดียวกับที่ app.py ใช้จริง กันไม่ให้เทสต์นี้ false-fail จาก timeout ที่แคบเกินไปเหมือนที่เคย
+    เจอมาก่อน 2026-07-05)
     session_id: ถ้าส่งไป worker จะฉีดร่าง+scrutiny เข้า chat memory ของ session นั้น (ดู ADR-004)"""
+    timeout = _worst_case_timeout_seconds(2, config.GEMINI_MODEL_DRAFT_FALLBACK)
     return _post(
         "/draft",
         {"topic": topic, "instructions": instructions, "answers": answers or {}, "session_id": session_id},
-        timeout=660,
+        timeout=timeout,
     )
 
 
 def call_review_target(source: str, file_name: str, content_base64: str | None = None) -> dict:
-    """เรียก /review/target — ดู ADR-006 (รวม LLM call 1 ครั้งสำหรับ checklist-derived topics)"""
+    """เรียก /review/target — ดู ADR-006 (รวม LLM call ทางตรรกะ 1 ครั้งสำหรับ checklist-derived topics)"""
+    timeout = _worst_case_timeout_seconds(1, config.GEMINI_MODEL_DRAFT_FALLBACK)
     return _post(
         "/review/target",
         {"source": source, "file_name": file_name, "content_base64": content_base64},
-        timeout=360,
+        timeout=timeout,
     )
 
 
@@ -149,6 +159,7 @@ def call_review_topic(
     requesting_followup: bool = False,
 ) -> dict:
     """เรียก /review/topic — ดู ADR-006"""
+    timeout = _worst_case_timeout_seconds(1, config.GEMINI_MODEL_DRAFT_FALLBACK)
     return _post(
         "/review/topic",
         {
@@ -158,7 +169,7 @@ def call_review_topic(
             "topic_id": topic_id,
             "requesting_followup_for_answer": requesting_followup,
         },
-        timeout=360,
+        timeout=timeout,
     )
 
 
@@ -167,6 +178,7 @@ def call_draft_questions_interactive(
     answers: dict | None = None, topic_id: str | None = None, requesting_followup: bool = False,
 ) -> dict:
     """เรียก /draft/questions/interactive — ดู ADR-007 (ไม่แก้ /draft/questions เดิม)"""
+    timeout = _worst_case_timeout_seconds(1, config.GEMINI_MODEL_DRAFT_FALLBACK)
     return _post(
         "/draft/questions/interactive",
         {
@@ -177,7 +189,7 @@ def call_draft_questions_interactive(
             "topic_id": topic_id,
             "requesting_followup_for_answer": requesting_followup,
         },
-        timeout=360,
+        timeout=timeout,
     )
 
 

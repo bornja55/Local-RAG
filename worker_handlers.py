@@ -6,8 +6,6 @@ HTTP layer (class Handler) อยู่ที่ rag_worker.py และเร�
 ข้อควรระวัง: state ที่ rebind ได้ (_index/_reranker/_sys_prompt) ต้องอ้างผ่าน state.X ที่
 call time เสมอ (ดูหมายเหตุใน worker_state.py) ส่วน lock/dict อ้างตรงได้เพราะไม่เคย rebind
 """
-import time
-
 import llm_fallback
 import worker_config as config
 import worker_state as state
@@ -30,8 +28,9 @@ from worker_prompts import (
 from worker_retrieval import _retrieve_context, _retrieve_context_scoped
 
 log = state.log
-_is_quota_error = llm_fallback.is_quota_error
-_is_fallback_worthy_error = llm_fallback.is_fallback_worthy_error
+# หมายเหตุ (2026-07-05): _is_quota_error/_is_fallback_worthy_error เคย alias ไว้ที่นี่สำหรับ
+# _handle_chat ใช้เอง — ตอนนี้ _handle_chat เรียก llm_fallback.run_with_fallback() ตรงๆ แทน (ตัดสิน
+# ใจ retry/fallback อยู่ในนั้นแล้ว) จึงไม่มีจุดไหนในไฟล์นี้ต้องใช้ 2 ฟังก์ชันนี้ตรงๆ อีก ลบ alias ออก
 
 
 def _build_llm(model: str):
@@ -52,6 +51,12 @@ def _complete_with_fallback(
 
 
 def _handle_chat(session_id: str, prompt: str) -> dict:
+    """หมายเหตุ (2026-07-05, ดู ADR-003 หมายเหตุเพิ่มเติมวันเดียวกัน): เดิม endpoint นี้เขียน
+    retry+fallback loop เองแยกต่างหากทั้งหมด (ไม่ผ่าน llm_fallback.complete_with_fallback เพราะใช้
+    chat_engine.chat() แทน llm.complete()) ทำให้ตรรกะเดียวกันซ้ำอยู่ 2 ที่ — ที่นี่ไม่มี unit test
+    คุ้มเลย (ดู HANDOFF.md "0b" ข้อ 4) ตอนนี้เรียก llm_fallback.run_with_fallback() ตรงๆ แทน (ตัวเดียว
+    กับที่ complete_with_fallback ใช้ ผ่าน 25 unit test อยู่แล้ว) เหลือแค่ส่วนที่เป็นของ chat จริงๆ
+    (สร้าง chat_engine ผูก memory/retriever) ให้ _handle_chat ทำเอง"""
     from llama_index.core.memory import ChatMemoryBuffer
     from llama_index.core import Settings
 
@@ -61,7 +66,9 @@ def _handle_chat(session_id: str, prompt: str) -> dict:
 
     def _build_chat_engine(model: str):
         # สร้าง llm + chat_engine ใหม่ทุกครั้งที่เรียก (ยืนยันแล้วจาก diagnostic tests ว่า
-        # ปลอดภัยข้าม thread — ไม่มี state ค้างจาก request ก่อนหน้า)
+        # ปลอดภัยข้าม thread — ไม่มี state ค้างจาก request ก่อนหน้า) — run_with_fallback() เรียก
+        # factory นี้ใหม่ทุก attempt รวมตอน retry โมเดลหลักซ้ำด้วย (ไม่ใช่แค่ตอนสลับโมเดลเหมือน
+        # โค้ดเดิมก่อนแก้ 2026-07-05) ปลอดภัยตามที่ comment นี้ยืนยันไว้แล้ว
         llm = _build_llm(model)
         Settings.llm = llm
         return state._index.as_chat_engine(
@@ -72,46 +79,16 @@ def _handle_chat(session_id: str, prompt: str) -> dict:
             system_prompt=state._sys_prompt,
         )
 
-    chat_engine = _build_chat_engine(config.GEMINI_MODEL_CHAT)
-
-    last_error = None
-    response_obj = None
-    for attempt in range(3):
-        try:
-            log(f"[CHAT session={session_id[:8]}] ถาม: {prompt[:50]}...")
-            t0 = time.time()
-            response_obj = chat_engine.chat(prompt)
-            log(f"[CHAT session={session_id[:8]}] สำเร็จใน {time.time() - t0:.2f}s")
-            break
-        except Exception as e:
-            last_error = e
-            log(f"[CHAT session={session_id[:8]}] error: {type(e).__name__} - {e}")
-            if _is_quota_error(e) and attempt < 2:
-                time.sleep(10 * (attempt + 1))
-                continue
-            break
-
-    # ── fallback ไปโมเดลสำรอง ไล่ทีละตัวตามลำดับใน GEMINI_MODEL_CHAT_FALLBACK ถ้าตั้งค่าไว้ และ
-    # retry โมเดลหลักครบแล้วยังชนโควตาอยู่ (ดู ADR-003 — ขยายเป็นหลายโมเดลในหมายเหตุ 2026-07-03) ──
-    if response_obj is None and config.GEMINI_MODEL_CHAT_FALLBACK and _is_fallback_worthy_error(last_error):
-        for fb_model in config.GEMINI_MODEL_CHAT_FALLBACK:
-            try:
-                log(f"[CHAT session={session_id[:8]}] โมเดล {config.GEMINI_MODEL_CHAT} ชนโควตา "
-                    f"กำลังลองโมเดลสำรอง {fb_model}...")
-                fallback_engine = _build_chat_engine(fb_model)
-                t0 = time.time()
-                response_obj = fallback_engine.chat(prompt)
-                log(f"[CHAT session={session_id[:8]}] สำเร็จใน {time.time() - t0:.2f}s "
-                    f"(โมเดลสำรอง: {fb_model})")
-                break
-            except Exception as e:
-                last_error = e
-                log(f"[CHAT session={session_id[:8]}] error (โมเดลสำรอง {fb_model}): "
-                    f"{type(e).__name__} - {e}")
-                continue
+    log_prefix = f"[CHAT session={session_id[:8]}]"
+    log(f"{log_prefix} ถาม: {prompt[:50]}...")
+    response_obj, error = llm_fallback.run_with_fallback(
+        config.GEMINI_MODEL_CHAT, config.GEMINI_MODEL_CHAT_FALLBACK,
+        _build_chat_engine, lambda engine: engine.chat(prompt),
+        log_prefix, log=log,
+    )
 
     if response_obj is None:
-        return {"error": str(last_error) if last_error else "unknown error"}
+        return {"error": str(error) if error else "unknown error"}
 
     sources = [
         {

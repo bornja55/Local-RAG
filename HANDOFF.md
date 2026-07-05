@@ -1,6 +1,35 @@
 # Handoff — Policy RAG Assistant (2026-07-03, ปรับปรุงล่าสุด 2026-07-05)
 
-## 0b. Update ล่าสุดสุด (2026-07-05 — live test บนเครื่องจริงยืนยันผ่านแล้ว) ← อ่านส่วนนี้ก่อน
+## 0d. Update ล่าสุดสุด (2026-07-05 — ปิด gap `_handle_chat` ไม่มี unit test คุ้ม) ← อ่านส่วนนี้ก่อน
+
+item #4 ใน "0b" ด้านล่าง (และที่ "0c" เคยย้ำว่ายังไม่ resolved) **แก้เสร็จแล้ว** — ดู ADR-003
+หมายเหตุเพิ่มเติม 2026-07-05 (ส่วนล่างสุด) สำหรับรายละเอียดเต็ม สรุปสั้น:
+
+- แยกตรรกะ retry+fallback ออกมาเป็น `llm_fallback.run_with_fallback()` กลาง ไม่รู้จักรูปแบบ
+  prompt/response เลย (รับแค่ `factory(model)`/`call(obj)`) — `complete_with_fallback()` เดิม
+  กลายเป็น wrapper บางๆ ของฟังก์ชันนี้ (25 unit test เดิมผ่านหมด ไม่แก้แม้แต่บรรทัดเดียว) และ
+  `_handle_chat()` เปลี่ยนมาเรียกฟังก์ชันนี้ตรงๆ แทนการเขียน loop เองแยกต่างหาก
+- เพิ่มเทสต์ 2 ชุด: `test_llm_fallback.py::TestRunWithFallbackGenericCallShape` (4 เทส) +
+  ไฟล์ใหม่ `test_handle_chat_fallback.py` (5 เทส, stub `llama_index` ผ่าน `sys.modules` ไม่ต้องมี
+  API key/โหลดโมเดล) — ครอบคลุม primary สำเร็จ, quota retry+backoff แล้ว fallback, timeout
+  fallback ทันทีไม่ retry ซ้ำ (regression ของบั๊ก ADR-003 เดิม), ทุกโมเดล fail, ไม่มี fallback ตั้งไว้
+- ระหว่างเขียนเทสพบบั๊ก 2 จุด (ทั้งคู่เป็นบั๊กใน test code เท่านั้น ไม่ใช่ production code) และแก้แล้ว:
+  (1) `test_llm_fallback.py::_FakeChatEngine.chat()` wrap ผลลัพธ์ซ้ำสองชั้นโดยไม่ตั้งใจ
+  (2) `llm_fallback.run_with_fallback()`'s `sleep=time.sleep` เป็น default ที่ freeze ไว้ตอน import
+  ทำให้ monkeypatch `time.sleep` ในเทสไม่มีผล (เทสรอ backoff จริง 10s+20s) — เปลี่ยนเป็น
+  `sleep=None` + resolve แบบ lazy ข้างในฟังก์ชันแทน พฤติกรรมจริงไม่เปลี่ยน
+- verify ผ่าน py_compile ทุกไฟล์ที่เกี่ยวข้อง (`worker_client.py`, `worker_handlers.py`,
+  `llm_fallback.py`, `test_rag_pipeline.py`, `rag_worker.py`, `worker_config.py`, `worker_state.py`,
+  `worker_parsing.py`, `worker_prompts.py`, `worker_retrieval.py`, `app.py`,
+  `test_llm_fallback.py`, `test_handle_chat_fallback.py`, `test_session_store.py`) +
+  `test_llm_fallback.py` 29/29 PASS + `test_handle_chat_fallback.py` 5/5 PASS +
+  `test_session_store.py` 5/5 PASS (regression, ไฟล์นี้ไม่ถูกแตะเลย)
+- ยังไม่ได้รัน `test_rag_pipeline.py` จริงบน Windows หลังการ refactor รอบนี้ (เหมือนที่ "0c" เคย
+  ทิ้งไว้เป็นงานค้าง) — ควรรันซ้ำเพื่อยืนยัน end-to-end จริงอีกครั้งก่อน commit
+
+---
+
+## 0b. Update ล่าสุดสุด (2026-07-05 — live test บนเครื่องจริงยืนยันผ่านแล้ว)
 
 ผู้ใช้รัน `venv\Scripts\python.exe test_rag_pipeline.py` บนเครื่องจริง (Windows) — **ผล 11/11 PASS
 ทั้งหมด** รวมถึง `/review/target` กับเอกสาร IT Risk จริงจาก corpus (ได้ 23 หัวข้อรีวิว) ที่เคย
@@ -28,15 +57,39 @@ worker ที่ test เรียกใช้คือโค้ดปัจจ�
    ตั้งแต่ commit `fb9abeb` (`_parse_model_chain()` ใน `worker_config.py`) ตัวอย่างค่าจริงใน
    `.env.example`: `GEMINI_MODEL_CHAT_FALLBACK=gemma-4-26b-a4b-it,gemini-2.5-flash-lite,gemini-3-flash-preview,gemini-2.5-flash`
    — ควรเพิ่มคำอธิบายลง README ให้คนอ่านเข้าใจ (ตอนนี้อธิบายแค่ใน code comment)
-4. **`/chat` (`_handle_chat` ใน `worker_handlers.py`) มี retry+fallback logic แยกเป็นของตัวเอง ไม่ผ่าน
-   `_complete_with_fallback`/`llm_fallback.complete_with_fallback` ที่มี 25 unit tests คุ้ม** — ใช้
-   `_build_llm()` เหมือนกัน (ได้ `GEMINI_REQUEST_TIMEOUT_MS` ถูกต้อง) แต่ loop ไล่โมเดลสำรอง
-   (บรรทัด ~94-111) เขียนเองแยกต่างหาก เพราะต้องผูกกับ `chat_engine.chat()`/session memory ไม่ใช่
-   LLM.complete() ตรงๆ แบบ handler อื่น — อ่านโค้ดแล้วทำงานถูกต้องตอนนี้ (retry primary เฉพาะ quota
-   error, escalate ไป fallback chain เมื่อ fallback-worthy) แต่**ไม่มี unit test คุ้มเส้นทางนี้โดยตรง**
-   ถ้าแก้ `_handle_chat` ในอนาคต บั๊ก ADR-003 เดิม (retry primary ตอน timeout) อาจกลับมาได้โดยไม่มีเทส
-   จับ — ควรพิจารณา refactor ให้ `_handle_chat` เรียก `_complete_with_fallback` ด้วย หรืออย่างน้อย
-   เพิ่ม unit test เฉพาะ loop นี้
+4. ~~**`/chat` (`_handle_chat` ใน `worker_handlers.py`) มี retry+fallback logic แยกเป็นของตัวเอง ไม่ผ่าน
+   `_complete_with_fallback`/`llm_fallback.complete_with_fallback` ที่มี 25 unit tests คุ้ม**~~
+   **resolved แล้ว (2026-07-05) — ดู "0d" ด้านบนสุด**: refactor ให้ `_handle_chat` เรียก
+   `llm_fallback.run_with_fallback()` (ตรรกะกลางเดียวกับ `complete_with_fallback`) ตรงๆ แทน พร้อม
+   เพิ่ม unit test เฉพาะเส้นทางนี้ครบแล้ว (`test_llm_fallback.py::TestRunWithFallbackGenericCallShape`
+   + `test_handle_chat_fallback.py` ใหม่ทั้งไฟล์)
+
+---
+
+## 0c. Update (2026-07-05 — `/scrutinize` + `debug-mantra` session: client timeout ไม่เคยครอบคลุม fallback chain)
+
+พบระหว่างรัน `/scrutinize` แล้วต่อด้วย `/anthropic-skills:debug-mantra` เพื่อ reproduce จริง (ไม่ใช่แค่
+อ่านโค้ดเดา) — ดู ADR-003 หมายเหตุเพิ่มเติม 2026-07-05 สำหรับรายละเอียดเต็ม สรุปสั้น:
+
+- ทุก `_call_worker_*` ใน `worker_client.py` + `test_rag_pipeline.py` ตั้ง client timeout จากแค่
+  "จำนวน LLM call ทางตรรกะ x `GEMINI_REQUEST_TIMEOUT_MS`" โดยไม่คูณด้วยจำนวนโมเดลใน fallback chain
+  — reproduce ด้วย dependency injection ยืนยันว่า worst-case จริงสูงกว่าที่ comment เดิมคำนวณไว้มาก
+  โดยเฉพาะ `_call_worker_chat()` ที่ timeout ค้างที่ 120s มาตั้งแต่ก่อนมี fallback chain เลย
+- **แก้แล้ว**: เพิ่ม `worker_client._worst_case_timeout_seconds()` คำนวณจาก config ตรงๆ แทน magic
+  number ใช้แทนทุกจุด (รวม `test_rag_pipeline.py`) — `/chat` จาก 120s → คำนวณอัตโนมัติ (~1530s ด้วย
+  ค่า `.env.example` ปัจจุบัน), `/draft` จาก 660s → ~3030s, endpoint อื่นๆ จาก 360-420s → ~1530s
+- **แก้เพิ่ม**: log message ใน fallback loop ทั้ง 2 จุด (`llm_fallback.py`, `worker_handlers.py`)
+  เคย hardcode ชื่อโมเดลหลัก + "ชนโควตา" ผิดตั้งแต่ fallback ตัวที่ 2 เป็นต้นไป (และผิดถ้า error ไม่ใช่
+  quota) — แก้ให้ track โมเดล/ประเภท error ที่เพิ่ง fail จริงแทนแล้ว
+- verify ผ่าน py_compile ทุกไฟล์ + `test_llm_fallback.py` (25/25) + `test_session_store.py` (5/5) +
+  repro script ยืนยันตัวเลข timeout ใหม่ตรงตามสูตร — **ยังไม่ได้รัน `test_rag_pipeline.py` จริงบน
+  Windows หลังแก้รอบนี้ ควรรันซ้ำเพื่อยืนยัน (เหมือนที่ "0b" เคยทำหลัง architecture refactor)**
+- เพิ่มคำอธิบายเรื่อง worst-case wait time ลง README.md/README_EN.md แล้ว (อธิบายว่าเจอบ่อยเฉพาะ
+  free tier ไม่ใช่บั๊ก) — **ยังไม่ได้เพิ่มใน README_MANAGEMENT.md/README_MANAGEMENT_EN.md** (แถวตาราง
+  ความเสี่ยง "คำขอไปยัง AI ค้างไม่ตอบสนอง" อาจต้องปรับคำอธิบายให้ตรงกับพฤติกรรมใหม่นี้ด้วย — ยังไม่ทำ)
+- item #4 ใน "0b" ด้านล่าง (ไม่มี unit test คุ้ม `_handle_chat` fallback loop) — เป็นคนละปัญหากับที่
+  แก้รอบนี้ (test coverage vs. client timeout math) **resolved แล้วในรอบถัดมาวันเดียวกัน — ดู "0d"
+  ด้านบนสุด**
 
 ---
 

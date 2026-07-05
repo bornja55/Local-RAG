@@ -18,11 +18,40 @@ import sys
 import urllib.error
 import urllib.request
 
+import worker_config as config
+
 WORKER_HOST = "127.0.0.1"
 WORKER_PORT = 8765
 WORKER_URL = f"http://{WORKER_HOST}:{WORKER_PORT}"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKER_SCRIPT = os.path.join(BASE_DIR, "rag_worker.py")
+
+# เผื่อ overhead เครือข่าย/JSON serialize เหนือเวลาที่ตัว LLM call ใช้จริง (ไม่เกี่ยวกับ
+# GEMINI_REQUEST_TIMEOUT_MS โดยตรง — กันกรณี timeout พอดิบพอดีจนตัด response ที่เพิ่งเสร็จจริงๆ)
+_NETWORK_BUFFER_SECONDS = 30
+
+
+def _worst_case_timeout_seconds(num_llm_calls: int, fallback_models: list[str]) -> int:
+    """คำนวณ client-side timeout ที่ควรใช้ต่อ endpoint หนึ่งๆ ให้ครอบคลุม worst-case ของ
+    auto-fallback chain เต็มรูปแบบ (ดู ADR-003 หมายเหตุ 2026-07-05 — พบจาก /scrutinize +
+    debug-mantra repro ว่าก่อนหน้านี้ทุก _call_worker_* คำนวณ timeout จากแค่
+    "จำนวน LLM call ทางตรรกะ x GEMINI_REQUEST_TIMEOUT_MS" โดยไม่ได้คูณด้วยจำนวนโมเดลที่
+    _complete_with_fallback()/_handle_chat() จะไล่ลอง (primary + fallback ตัวละ 1 attempt เต็ม
+    GEMINI_REQUEST_TIMEOUT_MS ถ้าเจอ timeout error ต่อเนื่อง — ดู llm_fallback.complete_with_fallback)
+    ทำให้ client timeout น้อยกว่า worst-case จริงมาก โดยเฉพาะ /chat ที่ค้างที่ 120s มาตั้งแต่ก่อนมี
+    fallback chain เลย ไม่เคยถูกปรับตามเลย (worst-case จริงตอนนั้น ~26 นาที ด้วย 4 fallback model
+    ตามค่าใน .env.example)
+
+    คำนวณจาก config ตรงๆ (ไม่ hardcode เลขคงที่) เพื่อไม่ให้ค่านี้ค้างผิดอีกถ้ามีคนเพิ่ม/ลด
+    จำนวน fallback model หรือปรับ GEMINI_REQUEST_TIMEOUT_MS ในอนาคต — self-correcting by construction
+
+    num_llm_calls: จำนวน LLM call ทางตรรกะต่อ 1 request ของ endpoint นั้น (เช่น /draft = 2
+        คือ ร่าง+scrutinize ต่อเนื่องกัน, /chat = 1, prefill/follow-up ทีละครั้ง = 1)
+    fallback_models: GEMINI_MODEL_CHAT_FALLBACK หรือ GEMINI_MODEL_DRAFT_FALLBACK แล้วแต่ endpoint
+        นั้นใช้โมเดลกลุ่มไหน (list ว่าง = ไม่มี fallback ก็ยังคำนวณถูก เหลือแค่ 1 attempt/call)"""
+    attempts_per_call = 1 + len(fallback_models)
+    worst_case = num_llm_calls * attempts_per_call * (config.GEMINI_REQUEST_TIMEOUT_MS / 1000)
+    return int(worst_case) + _NETWORK_BUFFER_SECONDS
 
 
 # ── Worker process management ───────────────────────────────────────────────
@@ -89,42 +118,50 @@ def _call_worker_endpoint(path: str, payload: dict, timeout: int) -> dict:
 
 
 def _call_worker_chat(session_id: str, prompt: str) -> dict:
-    return _call_worker_endpoint("/chat", {"session_id": session_id, "prompt": prompt}, timeout=120)
+    """เรียก /chat — timeout คำนวณจาก worst-case ของ GEMINI_MODEL_CHAT_FALLBACK เต็มรายการ (ดู
+    _worst_case_timeout_seconds) เพราะ _handle_chat ผูก GEMINI_REQUEST_TIMEOUT_MS เหมือน /draft
+    ทุกประการ และมี fallback loop ของตัวเองที่ไล่ลอง GEMINI_MODEL_CHAT_FALLBACK เต็มรายการเช่นกัน
+    (ก่อนหน้านี้ค่านี้คงที่ 120s มาตั้งแต่ก่อนมี fallback chain — ไม่เคยถูกปรับตาม พบจาก /scrutinize
+    2026-07-05 ว่า worst-case จริงอาจสูงถึง ~26 นาทีด้วยค่า .env.example ปัจจุบัน)"""
+    timeout = _worst_case_timeout_seconds(1, config.GEMINI_MODEL_CHAT_FALLBACK)
+    return _call_worker_endpoint("/chat", {"session_id": session_id, "prompt": prompt}, timeout=timeout)
 
 
 def _call_worker_draft(
     topic: str, instructions: str, answers: dict | None = None, session_id: str | None = None
 ) -> dict:
-    """เรียก /draft — ใช้โมเดลที่ reasoning ดีกว่า (GEMINI_MODEL_DRAFT) และเรียก LLM 2 ครั้ง
-    (ร่าง + scrutinize) ต่อคำขอ จึงตั้ง timeout ยาวกว่า _call_worker_chat — worker จำกัด 1 LLM call
-    ไว้ไม่เกิน GEMINI_REQUEST_TIMEOUT_MS (ดีฟอลต์ 5 นาที) ต่อครั้ง ดังนั้น 2 ครั้งรวมกันในทางทฤษฎีอาจ
-    ถึงเกือบ 10 นาที (กรณีเลวร้ายที่สุด) จึงตั้ง client timeout ไว้กว้างกว่านั้นพอสมควร
+    """เรียก /draft — ใช้โมเดลที่ reasoning ดีกว่า (GEMINI_MODEL_DRAFT) และเรียก LLM 2 ครั้งทางตรรกะ
+    (ร่าง + scrutinize) ต่อคำขอ แต่ละครั้งอาจไล่ลอง GEMINI_MODEL_DRAFT_FALLBACK เต็มรายการถ้าเจอ
+    timeout/quota ต่อเนื่อง (ดู _worst_case_timeout_seconds) จึง timeout ยาวกว่า _call_worker_chat มาก
     answers: คำถาม->คำตอบ จากขั้นตอนคำถามเพิ่มเติม (ดู ADR-002/ADR-007) ส่งต่อให้ worker เพื่อ ground ร่าง
     session_id: ถ้าส่งไป worker จะฉีดร่าง+scrutiny เข้า chat memory ของ session นี้ ทำให้โหมด
     ถาม-ตอบปกติในเซสชันเดียวกันอ้างอิงร่างนี้ต่อได้ (ดู ADR-004)"""
+    timeout = _worst_case_timeout_seconds(2, config.GEMINI_MODEL_DRAFT_FALLBACK)
     return _call_worker_endpoint(
         "/draft",
         {"topic": topic, "instructions": instructions, "answers": answers or {}, "session_id": session_id},
-        timeout=660,
+        timeout=timeout,
     )
 
 
 def _call_worker_topic_step(endpoint: str, payload: dict) -> dict:
     """เรียก endpoint ทีละหัวข้อ (ใช้ร่วมกันโดย /draft/questions/interactive และ /review/topic
     เพราะ request/response shape เหมือนกันทุกประการ — ADR-007 ข้อ 3 ตั้งใจ reuse กลไกนี้จาก ADR-006)
-    ทำ LLM call ครั้งเดียว (prefill หรือ follow-up) ต่อคำขอ ตั้ง timeout ให้กว้างกว่า
-    GEMINI_REQUEST_TIMEOUT_MS ฝั่ง worker (ดีฟอลต์ 5 นาที) พอสมควร กันเคส client timeout ก่อน worker เอง"""
-    return _call_worker_endpoint(endpoint, payload, timeout=360)
+    ทำ LLM call ทางตรรกะครั้งเดียว (prefill หรือ follow-up) ต่อคำขอ ใช้ GEMINI_MODEL_DRAFT_FALLBACK
+    เหมือนโหมดร่าง/รีวิวอื่นๆ (ดู _worst_case_timeout_seconds)"""
+    timeout = _worst_case_timeout_seconds(1, config.GEMINI_MODEL_DRAFT_FALLBACK)
+    return _call_worker_endpoint(endpoint, payload, timeout=timeout)
 
 
 def _call_worker_review_target(source: str, file_name: str, content_base64: str | None = None) -> dict:
     """เรียก /review/target — ส่งเอกสารเป้าหมาย (อัปโหลดหรือเลือกจาก corpus) ไปให้ worker parse
-    heading + สร้าง Review Topics (รวม LLM call 1 ครั้งสำหรับ checklist-derived topics — ดู ADR-006)
-    + auto-suggest เอกสารที่เกี่ยวข้อง — ตั้ง timeout กว้างกว่า GEMINI_REQUEST_TIMEOUT_MS ฝั่ง worker"""
+    heading + สร้าง Review Topics (รวม LLM call ทางตรรกะ 1 ครั้งสำหรับ checklist-derived topics —
+    ดู ADR-006) + auto-suggest เอกสารที่เกี่ยวข้อง (ดู _worst_case_timeout_seconds)"""
+    timeout = _worst_case_timeout_seconds(1, config.GEMINI_MODEL_DRAFT_FALLBACK)
     return _call_worker_endpoint(
         "/review/target",
         {"source": source, "file_name": file_name, "content_base64": content_base64},
-        timeout=360,
+        timeout=timeout,
     )
 
 
@@ -132,8 +169,9 @@ def _call_worker_review_finalize(
     file_name: str, review_topics: list[dict], answers: dict, confirmed_docs: list[str]
 ) -> dict:
     """เรียก /review/finalize — ขั้นตอนสุดท้ายของโหมดรีวิวเอกสาร รวมคำตอบทุกหัวข้อเป็นรายงานสรุปการ
-    เปลี่ยนแปลง + เอกสารฉบับปรับปรุงคู่กัน (ดู ADR-006 ข้อ 6) — LLM call ครั้งเดียวแต่ context อาจใหญ่
-    (รวมคำตอบทุกหัวข้อ) ตั้ง timeout กว้างกว่า GEMINI_REQUEST_TIMEOUT_MS ฝั่ง worker พอสมควร"""
+    เปลี่ยนแปลง + เอกสารฉบับปรับปรุงคู่กัน (ดู ADR-006 ข้อ 6) — LLM call ทางตรรกะครั้งเดียวแต่ context
+    อาจใหญ่ (รวมคำตอบทุกหัวข้อ) (ดู _worst_case_timeout_seconds)"""
+    timeout = _worst_case_timeout_seconds(1, config.GEMINI_MODEL_DRAFT_FALLBACK)
     return _call_worker_endpoint(
         "/review/finalize",
         {
@@ -142,5 +180,5 @@ def _call_worker_review_finalize(
             "answers": answers,
             "confirmed_cross_reference_docs": confirmed_docs,
         },
-        timeout=420,
+        timeout=timeout,
     )

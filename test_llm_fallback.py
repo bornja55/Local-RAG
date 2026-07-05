@@ -15,7 +15,12 @@ test_llm_fallback.py — pure unit test ของ llm_fallback.py (ดู Archit
 """
 import unittest
 
-from llm_fallback import complete_with_fallback, is_fallback_worthy_error, is_quota_error
+from llm_fallback import (
+    complete_with_fallback,
+    is_fallback_worthy_error,
+    is_quota_error,
+    run_with_fallback,
+)
 
 
 class _FakeResponse:
@@ -221,6 +226,109 @@ class TestCompleteWithFallback(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(factory.calls, ["primary", "primary"])
         self.assertEqual(sleeps, [10])
+
+
+# ── run_with_fallback: ตัว engine ทั่วไป (ดู ADR-003 หมายเหตุ 2026-07-05) ──────────────────────
+# ทดสอบด้วย call shape ที่ "ไม่ใช่" llm.complete() (จำลอง chat_engine.chat() ที่ _handle_chat ใช้จริง)
+# เพื่อยืนยันว่าฟังก์ชันนี้ generic จริง ไม่ผูกกับรูปแบบของ complete_with_fallback เพียงอย่างเดียว —
+# complete_with_fallback ด้านบนเป็นแค่ 1 ใน 2 ผู้ใช้งานของฟังก์ชันนี้เท่านั้น (อีกที่คือ _handle_chat)
+
+
+class _FakeChatResponse:
+    """เลียนแบบ response object ของ llama_index chat engine (มี .response/.source_nodes)
+    ต่างจาก _FakeResponse ด้านบนที่เลียนแบบ llm.complete() (มีแค่ .text)"""
+
+    def __init__(self, response_text, source_nodes=()):
+        self.response = response_text
+        self.source_nodes = list(source_nodes)
+
+
+class _FakeChatEngine:
+    """เลียนแบบ chat_engine ที่มี .chat(prompt) แทน .complete(prompt) — ใช้ทดสอบว่า
+    run_with_fallback() ใช้ได้กับ call shape ที่ต่างจาก complete_with_fallback จริงๆ"""
+
+    def __init__(self, script):
+        self._script = script
+
+    def chat(self, prompt):
+        result = self._script.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result  # ต้องเป็น _FakeChatResponse อยู่แล้ว (สคริปต์ใส่มาสำเร็จรูป — เหมือน
+        # _FakeChatEngine ใน test_handle_chat_fallback.py แก้ 2026-07-05: เดิม wrap ซ้ำเป็น
+        # _FakeChatResponse(result) ทั้งที่ result เป็น _FakeChatResponse อยู่แล้ว ทำให้
+        # .response กลายเป็น object แทนที่จะเป็น str ที่คาดไว้ (เทสยังพังไม่รู้ตัวเพราะไม่มีใคร
+        # เรียก TestRunWithFallbackGenericCallShape มาก่อนจนกว่าจะรันจริงรอบนี้)
+
+
+class _ScriptedChatEngineFactory:
+    def __init__(self, scripts: dict):
+        self._scripts = {model: list(script) for model, script in scripts.items()}
+        self.calls: list[str] = []
+
+    def __call__(self, model):
+        self.calls.append(model)
+        return _FakeChatEngine(self._scripts[model])
+
+
+class TestRunWithFallbackGenericCallShape(unittest.TestCase):
+    """ยืนยันว่า run_with_fallback() ใช้ได้กับ object/call shape ใดก็ได้ ไม่ใช่แค่ llm.complete() —
+    นี่คือ path เดียวกับที่ _handle_chat ใน worker_handlers.py เรียกใช้จริง (ดู
+    test_handle_chat_fallback.py สำหรับเทสต์ระดับ _handle_chat ทั้งฟังก์ชัน รวม llama_index stub)"""
+
+    def _run(self, factory, primary="primary", fallbacks=None, sleeps=None):
+        sleeps = sleeps if sleeps is not None else []
+        prompt = "สวัสดี"
+        return run_with_fallback(
+            primary, fallbacks or [], factory, lambda engine: engine.chat(prompt),
+            "[TEST-CHAT]", log=lambda msg: None, sleep=sleeps.append,
+        )
+
+    def test_primary_success_returns_response_object_not_text(self):
+        """ต่างจาก complete_with_fallback (คืน .text เป็น str) — run_with_fallback คืนอะไรก็ตามที่
+        call() คืนมาตรงๆ ในที่นี้คือ response object ทั้งก้อน (มี .response/.source_nodes)"""
+        factory = _ScriptedChatEngineFactory({"primary": [_FakeChatResponse("ตอบแล้ว", source_nodes=[1, 2])]})
+        result, error = self._run(factory)
+        self.assertIsNone(error)
+        self.assertEqual(result.response, "ตอบแล้ว")
+        self.assertEqual(result.source_nodes, [1, 2])
+        self.assertEqual(factory.calls, ["primary"])
+
+    def test_timeout_triggers_fallback_without_retrying_primary_chat_shape(self):
+        """regression test เดียวกับ complete_with_fallback แต่ผ่าน call shape ของ chat —
+        พิสูจน์ว่าบั๊ก ADR-003 เดิม (retry primary ตอน timeout) แก้ที่จุดเดียว ใช้ร่วมกันทั้ง 2 path"""
+        factory = _ScriptedChatEngineFactory({
+            "primary": [ReadTimeout("Request timed out")],
+            "fb1": [_FakeChatResponse("ตอบจากโมเดลสำรอง")],
+        })
+        sleeps = []
+        result, error = self._run(factory, fallbacks=["fb1"], sleeps=sleeps)
+        self.assertIsNone(error)
+        self.assertEqual(result.response, "ตอบจากโมเดลสำรอง")
+        self.assertEqual(factory.calls, ["primary", "fb1"])  # ไม่ retry primary ซ้ำ
+        self.assertEqual(sleeps, [])
+
+    def test_quota_retries_3_times_then_fallback_chat_shape(self):
+        factory = _ScriptedChatEngineFactory({
+            "primary": [_quota_exc(), _quota_exc(), _quota_exc()],
+            "fb1": [_FakeChatResponse("ตอบจากโมเดลสำรอง")],
+        })
+        sleeps = []
+        result, error = self._run(factory, fallbacks=["fb1"], sleeps=sleeps)
+        self.assertIsNone(error)
+        self.assertEqual(result.response, "ตอบจากโมเดลสำรอง")
+        self.assertEqual(factory.calls, ["primary", "primary", "primary", "fb1"])
+        self.assertEqual(sleeps, [10, 20])
+
+    def test_all_fallbacks_fail_returns_none_and_last_error_chat_shape(self):
+        last = Exception("fb1 พังเป็นตัวสุดท้าย")
+        factory = _ScriptedChatEngineFactory({
+            "primary": [ReadTimeout("timed out")],
+            "fb1": [last],
+        })
+        result, error = self._run(factory, fallbacks=["fb1"])
+        self.assertIsNone(result)
+        self.assertIs(error, last)
 
 
 if __name__ == "__main__":

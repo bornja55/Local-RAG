@@ -137,6 +137,27 @@ This calls the model directly, bypassing the worker/app entirely. If the model y
 
 **Good to know:** responses within the same session may occasionally come from a different model without any explicit notice. Test the quality of whichever fallback model you choose before relying on it in production (see ADR-003).
 
+**⏱️ Worst-case wait time (mostly a free-tier concern):** the app's client-side timeouts are sized
+to cover the full worst case — the primary model **and** every fallback model in the list stalling
+or hitting quota one after another (each one can take up to `GEMINI_REQUEST_TIMEOUT_MS` before giving
+up). With the default example above (5 models per function, 5-minute cap each), that means:
+
+- A normal question (`/chat`) can take up to ~25 minutes in the absolute worst case
+- Drafting a document (`/draft`, draft + scrutinize combined) can take up to ~50 minutes
+
+In practice this almost never happens on a **paid API key** — quota is much higher, so the odds of
+every single model hitting quota or stalling at the same time are very low. Real-world wait times
+stay in the seconds-to-low-minutes range, same as before the fallback chain existed.
+
+This scenario becomes more likely specifically on the **free tier** of Google AI Studio under heavy
+use, where several Gemini "Text-out models" can exhaust their daily quota at roughly the same time
+(free-tier quota tends to be shared at a category level — see ADR-003), forcing the system to work
+through most of the fallback list before finding one that still works. **This is not a bug — it's a
+deliberate trade-off**: accept a longer worst-case wait rather than cutting the connection before the
+auto-fallback mechanism (which exists specifically to solve this) has a real chance to finish. If you
+hit unusually long waits often on the free tier, consider trimming the `..._FALLBACK` lists or
+upgrading to a paid tier.
+
 ---
 
 ## 🧹 Session Cleanup (Automatic)
