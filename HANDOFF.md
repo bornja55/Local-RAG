@@ -1,6 +1,74 @@
 # Handoff — Policy RAG Assistant (2026-07-03, ปรับปรุงล่าสุด 2026-07-05)
 
-## 0e. Update ล่าสุดสุด (2026-07-05 — รวม unit test 3 ไฟล์เป็น `test_all.py` ไฟล์เดียว) ← อ่านส่วนนี้ก่อน
+## 0f. Session Handoff (2026-07-05, สิ้นสุด session นี้) ← อ่านส่วนนี้ก่อนสุด
+
+**Goal**: Policy RAG Assistant — worker แยกโปรเซส (Streamlit `app.py` ↔ `rag_worker.py` HTTP
+`127.0.0.1:8765`) แก้บั๊ก timeout/fallback ที่ `/scrutinize` เจอ, ปิด gap unit test, ทำเอกสารให้ตรงกับ
+พฤติกรรมจริง, commit ขึ้น git — งานหลักทั้งหมดเสร็จแล้ว เหลือแค่ผู้ใช้ `git push` เอง
+
+**Current State (ทำเสร็จ, verify แล้วทุกจุด)**:
+- Client-timeout math + misleading fallback log + `_handle_chat` test-coverage gap (ผ่าน
+  `llm_fallback.run_with_fallback()` กลาง) — commit `5acd316`
+- ลบ `README_MANAGEMENT.md`/`README_MANAGEMENT_EN.md` (เอกสาร "ฉบับผู้บริหาร" ที่ไม่มีผู้อ่านจริง
+  ตามที่ผู้ใช้ยืนยัน) ทั้งดิสก์และ git — commit `844f91b`
+- รวม `test_llm_fallback.py`(29)+`test_handle_chat_fallback.py`(5)+`test_session_store.py`(5) →
+  `test_all.py` ไฟล์เดียว (39 เทส, pure stdlib unittest) verify 39/39 PASS ในสภาพแวดล้อมสะอาด —
+  `test_rag_pipeline.py` (E2E) กับ `test_fallback_model.py` (manual CLI) ตั้งใจไม่รวมด้วย (คนละประเภท
+  เทส) — เก็บ prose reference เก่าใน ADR.md/HANDOFF.md ไว้เป็นบันทึกประวัติ ไม่แก้ย้อนหลัง แต่เพิ่ม
+  หมายเหตุกำกับชัดเจนว่าไฟล์ปัจจุบันคือ `test_all.py` — commit `14a6b73`
+- ยืนยันด้วย `git diff --stat HEAD` ว่าไม่มีไฟล์ production ใดถูกแก้ใน commit `14a6b73` เลย
+  (`llm_fallback.py`/`worker_handlers.py`/`worker_client.py`/`README*.md`/`test_rag_pipeline.py`
+  ตรงกับ HEAD เป๊ะ — diff ที่ `git status --short` เคยโชว์เป็นแค่ artifact ของ default index ที่พังมา
+  ตั้งแต่ก่อน session นี้ ดู Constraints ด้านล่าง)
+
+**Next Steps**:
+1. ผู้ใช้รัน `git push origin main` จากเครื่องจริง (Windows, `D:\Review Policy\Local  RAG`) —
+   push commit `5acd316`, `844f91b`, `14a6b73` ที่ยังไม่ขึ้น `origin/main` (ปัจจุบันค้างที่ `0bdb639`)
+   — sandbox นี้ไม่มี credential ทำเองไม่ได้
+2. (แนะนำ ไม่บังคับ) รัน `venv\Scripts\python.exe test_all.py` และ `test_rag_pipeline.py` บนเครื่องจริง
+   อีกครั้งเพื่อยืนยันนอก sandbox — โค้ด production ไม่เปลี่ยนเลยรอบนี้ ความเสี่ยง regression ต่ำมาก
+
+**Open Questions / Blockers**:
+- ยังไม่ยืนยันว่าผู้ใช้ push จริงหรือยัง
+- `test_rag_pipeline.py` ยังไม่ได้รันซ้ำบน Windows หลัง commit `14a6b73` (แต่ไม่ได้แก้ไฟล์ production
+  เลยในรอบนี้ ความเสี่ยงต่ำ)
+
+**Context & Constraints สำคัญสำหรับ agent ถัดไป**:
+- Sandbox bash mount serve เนื้อหา**เก่า/truncate**สำหรับไฟล์ที่เพิ่งแก้ — Read/Write/Edit tool คือ
+  source of truth เสมอ ห้ามเชื่อ `wc -l`/`cat` ผ่าน bash เฉยๆ กับไฟล์ที่เพิ่งแก้ ต้อง Read แล้ว Write
+  ไปที่ outputs ก่อน แล้วค่อย cp เข้า `/tmp` มา compile/test
+- **Default git index ในนี้พังมาตั้งแต่ก่อน session นี้** (staged content ไม่ตรงความจริง) —
+  `git status --short`/`git diff HEAD` (ไม่ระบุ path) ให้ผลลัพธ์หลอกได้ ("MM" ทั้งที่ไฟล์ไม่ได้แก้จริง)
+  วิธี verify จริง: `git diff --stat HEAD -- <path>` หรือ `diff <(git show HEAD:<path>) <path>`
+  วิธี commit ที่ปลอดภัย: ใช้ alternate index เสมอ —
+  `GIT_INDEX_FILE=/tmp/xxx git read-tree HEAD` → `git hash-object -w <file>` ต่อไฟล์ →
+  `git update-index --cacheinfo 100644,<hash>,<path>` (หรือ `--remove` สำหรับไฟล์ที่ลบ) →
+  `git write-tree` → `git commit-tree <tree> -p HEAD -F <msgfile>` → `git update-ref refs/heads/main <sha>`
+  ห้ามใช้ `git add`/`git commit` ธรรมดาใน sandbox นี้
+- `.git/index.lock`/`.git/HEAD.lock` ค้างได้ `rm` ตรงๆ ไม่ผ่าน ("Operation not permitted") — เรียก
+  `mcp__cowork__allow_cowork_file_delete` กับ path ของ lock file ก่อนเสมอ
+- `git push` รันจาก sandbox นี้ไม่ได้เลย (ไม่มี credential helper) — ต้องส่ง command ให้ผู้ใช้รันเอง
+  เสมอ ห้ามพยายามรันตรงๆ
+- Convention เดิมของโปรเจกต์: docstring/comment/log ภาษาไทย, module ชื่อ `worker_*` แบบ flat,
+  test ใช้ stdlib `unittest` (ไม่ใช่ pytest), คงชื่อ underscore เดิมข้ามโมดูลเพื่อลด diff
+- ADR.md/HANDOFF.md เป็น**บันทึกประวัติแบบ append-only** — พบอะไรใหม่ให้เพิ่ม section ใหม่ที่มี
+  วันที่กำกับไว้บนสุด ไม่แก้ entry เก่าย้อนหลัง (ยกเว้น "current state" pointer list ที่จะทำให้เข้าใจผิด
+  จริงๆ ถึงแก้ในจุดนั้นได้)
+
+**Key Files**:
+- `test_all.py` — unit test suite เดียวรวมทั้งหมด (39 เทส, pure unittest, รันได้โดยไม่ต้องมี API
+  key/โมเดล/worker จริง) — `venv\Scripts\python.exe test_all.py`
+- `test_rag_pipeline.py` — E2E (11 เทส, ต้องมี worker จริง+API key), ไม่แตะรอบนี้
+- `test_fallback_model.py` — manual CLI ตรวจชื่อโมเดลสำรองทีละตัว, ไม่แตะรอบนี้
+- `llm_fallback.py`/`worker_handlers.py`/`worker_client.py`/`worker_state.py`/`worker_config.py` —
+  โค้ด production, **ไม่เปลี่ยนเลยรอบนี้** (verify แล้วตรงกับ HEAD เป๊ะ)
+- `ADR.md`/`HANDOFF.md` — แก้รอบนี้ (เพิ่ม section ใหม่ + ล้าง reference เก่าที่ตายแล้ว)
+- `README.md`/`README_EN.md` — ไม่แตะรอบนี้
+- `README_MANAGEMENT.md`/`README_MANAGEMENT_EN.md` — **ลบแล้ว** (ทั้งดิสก์+git) ห้ามสร้างใหม่
+
+---
+
+## 0e. Update (2026-07-05 — รวม unit test 3 ไฟล์เป็น `test_all.py` ไฟล์เดียว)
 
 ตามคำขอผู้ใช้ให้เหลือไฟล์ทดสอบเดียวที่รวมทุกฟังก์ชันที่ต้องทดสอบ — `test_llm_fallback.py` (29 เทส) +
 `test_handle_chat_fallback.py` (5 เทส) + `test_session_store.py` (5 เทส) **ลบทิ้งแล้ว รวมเป็น
@@ -282,54 +350,4 @@ Both went through `/scrutinize` **4 times** (each round found real issues, all f
 - **Endpoint isolation, both ADRs**: new endpoints only (`/review/*` for ADR-006, `/draft/questions/interactive` for ADR-007) — **never modify `/draft*` or `/draft/questions`**, so `test_rag_pipeline.py` stays green untouched. Add new tests for the new endpoints instead of editing existing ones.
 - Cost/budget and user drop-off concerns were deliberately **ruled out as non-issues** and removed from Consequences — this is a single-org internal tool, each user brings their own Gemini API key, ADR-003's existing auto-fallback already absorbs quota spikes. Don't reintroduce these as blockers.
 - Company rename (`COMPANY_NAME`="ออริจิ้น โกลบอล เอ็มไพร์" vs indexed docs saying "ทเวนตี้ โฟร์ คอน แอนด์ ซัพพลาย") is a **real legal-entity rename, confirmed by user, not a data bug** — no corpus fix needed. It's *why* ADR-006/007 exist (draft mode was silently reusing pre-rename content unconfirmed) but the fix is the provenance rule above, not touching the corpus.
-- `CONTEXT.md` glossary additions: Review Topic, Document Review Mode, Prefill (+ provenance rule), Cross-reference documents, Target document access, Cross-reference retrieval.
-- **Mistake made and corrected mid-session, worth knowing**: first pass wrote the provenance rule inline in both ADR-006 and ADR-007 *in addition to* CONTEXT.md — same duplication problem it was meant to solve, caught on the 4th `/scrutinize` pass and trimmed to references only. If the provenance rule ever needs to change, edit `CONTEXT.md` only.
-
-**Also fixed this session (unrelated to ADR-006/007, already applied to `generate_docx.py`, not yet committed):**
-- `generate_docx.py` didn't render markdown tables at all — `_add_markdown_line()` had no table handling, so `| col | col |` / `| :--- |` lines were dumped in as literal paragraph text (visible pipe/dash garbage in exported `.docx`). Fixed by adding `_add_markdown_table()` + `_is_table_row()` / `_is_table_separator_row()` / `_split_table_row()` — detects a table block, builds a real Word table (`Table Grid` style, bold header), converts `<br>` in cells to real line breaks, reuses `_add_runs_with_bold()` for bold/`[ต้องระบุ: ...]` inside cells. Verified with a standalone test in the sandbox (not the user's venv).
-
-## 3. Next Steps
-
-1. ~~**Commit the still-uncommitted fixes first**~~ **Stale as of 2026-07-05 — these were already
-   committed** (`e5cd6f3`, `83bd90b`, confirmed via `git log`), no action needed here. What's
-   actually uncommitted right now is the architecture-refactor split (`worker_*.py` new files +
-   modified `rag_worker.py`/`app.py`) from section "0a" — see "0b" above for what to commit instead.
-2. **Read `ADR.md` ADR-006 and ADR-007 in full** (this handoff is a summary, the ADRs have the actual decisions with rationale).
-3. **Implement in this order** (ADR-006 first, ADR-007 reuses its plumbing):
-   a. `build_index.py` + `rag_worker.py`: add metadata filtering to the retriever so **Cross-reference retrieval** can be scoped to a specific file list (doesn't exist today — retrieval is always corpus-wide).
-   b. `rag_worker.py`: **Target document access** — direct-parse path for the review target, separate from the FAISS retriever entirely. Markdown: read `##`/`###` headings directly. `.docx`: use python-docx, read paragraph `style.name` for `Heading 1/2/3`. Must detect "no parseable heading structure" and return a rejection signal (not silently fall back).
-   c. New worker endpoints: `POST /review/target` (submit target doc → Review Topics + auto-suggested cross-reference docs, one response) and `POST /review/topic` (stateless — client sends full topic list + answers-so-far, gets prefill + next question back).
-   d. `app.py`: new "Document Review" UI section, one-topic-at-a-time with back button, separate from the existing draft-mode 3-stage flow.
-   e. Then ADR-007: new `POST /draft/questions/interactive` endpoint reusing the same one-at-a-time/prefill mechanics built in (c)/(d), expand the clarifying-question prompt to 10-25 categorized questions with follow-ups, upgrade its model to `GEMINI_MODEL_DRAFT`. Leave `/draft/questions` completely untouched.
-   f. Add new tests to `test_rag_pipeline.py` for the new endpoints — do not modify the existing 6 tests (they cover `/draft/questions`'s old single-shot contract, which must keep working).
-4. Confirm with the user whether to enable the fallback model in production now (`GEMINI_MODEL_CHAT_FALLBACK` / `GEMINI_MODEL_DRAFT_FALLBACK` in real `.env`) — unrelated to ADR-006/007, just an old open item.
-
-## 4. Open Questions / Blockers
-
-None block starting implementation — ADR-006/007 scrutinized clean. Implementation-level judgment calls the next agent will still need to make (normal detail work, not design gaps):
-- Exact checklist content per document type (ADR-006 decision 4 says "checklist เฉพาะประเภทเอกสาร" but doesn't enumerate one per type — will need at least one worked example, e.g. IT risk policy, to validate the approach).
-- Exact category names for grouping ADR-007's 10-25 questions (ADR gives examples like "ขอบเขต / บทบาทและความรับผิดชอบ / ตัวชี้วัด / การอนุมัติ" but implementer should adapt per topic).
-- Go-live date for fallback models — old open item, not technical, not urgent.
-
-## 5. Context & Constraints
-
-- **Architecture (must not change)**: two-process split — `app.py` (thin Streamlit UI) ↔ `rag_worker.py` (holds torch/faiss/embedding/reranker/LLM) over local HTTP `127.0.0.1:8765`. Fixes a Windows WINHTTP.dll access-violation crash from native-library conflicts — never recombine into one process.
-- **RAG stack**: BGE-M3 embedding + BGE-reranker-v2-m3 (local, `HF_HUB_OFFLINE=1`), FAISS vector store, LlamaIndex `condense_plus_context` chat engine, `llama_index.llms.google_genai.GoogleGenAI`.
-- **"Iron rule" grounding** (`_build_sys_prompt()`) — Q&A mode must never answer outside retrieved documents. Draft mode and Review mode are explicitly exempt (they compose new content) but must always self-critique / never present output as approved.
-- **Endpoint discipline established this session**: new features get new endpoints, never modify existing ones that have passing tests (`/draft`, `/draft/questions`) — this is now a standing pattern, not just an ADR-006/007-specific choice.
-- **Sandbox constraint**: the assistant's bash tool cannot reach the user's `localhost:8765`, their venv, or run `git push`/`pip install`/`test_rag_pipeline.py` for them — hand over exact PowerShell commands, don't attempt to run directly. (python-docx testing for the `generate_docx.py` fix was done in the assistant's own isolated sandbox venv, not the user's — still valid since that module has no torch/faiss dependency.)
-- **Write-tool truncation risk**: writing large (~300+ line) Thai/UTF-8 files in one call can silently truncate. Split into ~100-200 line chunks if writing something that big.
-- **venv-vs-bare-python gotcha**: `ModuleNotFoundError` despite correct `requirements.txt` usually means the user ran bare `python` instead of `venv\Scripts\python.exe`.
-- **Model-name verification pattern**: never trust an LLM-guessed Gemini model identifier — verify against official docs or `test_fallback_model.py <model_name>` before writing it anywhere.
-
-## 6. Key Files
-
-- `ADR.md` — **read ADR-006 and ADR-007 in full before coding anything**, source of truth for all decisions in this handoff.
-- `CONTEXT.md` — glossary; **Prefill provenance rule lives here only**, don't duplicate it back into the ADRs.
-- `rag_worker.py` (~782 lines) — worker process; ADR-006/007 work adds new endpoints here alongside existing `_handle_chat`/`_handle_draft`/`_handle_clarify_questions`.
-- `app.py` — Streamlit UI; ADR-006/007 work adds a new Review Mode UI section here alongside the existing 3-stage draft flow.
-- `build_index.py` — index builder; needs metadata-filtering support added for Cross-reference retrieval (ADR-006).
-- `generate_docx.py` (~90 lines) — Markdown→docx conversion; table rendering just fixed (see Current State), not yet committed.
-- `test_rag_pipeline.py` — 6-test E2E suite, currently 6/6 PASS covering `/draft`, `/draft/questions`, `/chat` — add new tests for ADR-006/007 endpoints, don't touch these.
-- `.env` / `.env.example` — `GEMINI_MODEL_CHAT_FALLBACK`, `GEMINI_MODEL_DRAFT_FALLBACK`, `SESSION_IDLE_TIMEOUT_SECONDS`. `.env` is gitignored.
-- `README.md` / `README_EN.md` — docs current through ADR-005; will need an update pass once ADR-006/007 ship (not done yet, not urgent until implementation lands). (`README_MANAGEMENT*.md` deleted 2026-07-05 — was a fictional "executive summary" doc with no real audience, per user.)
+- `CONTEXT.md` glossary additions: Review Topic, Document Review Mode, Prefill (+ provenance rule), Cross-reference documents, Target documen
