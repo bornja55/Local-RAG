@@ -1,6 +1,28 @@
 # Handoff — Policy RAG Assistant (2026-07-03, ปรับปรุงล่าสุด 2026-07-05)
 
-## 0d. Update ล่าสุดสุด (2026-07-05 — ปิด gap `_handle_chat` ไม่มี unit test คุ้ม) ← อ่านส่วนนี้ก่อน
+## 0e. Update ล่าสุดสุด (2026-07-05 — รวม unit test 3 ไฟล์เป็น `test_all.py` ไฟล์เดียว) ← อ่านส่วนนี้ก่อน
+
+ตามคำขอผู้ใช้ให้เหลือไฟล์ทดสอบเดียวที่รวมทุกฟังก์ชันที่ต้องทดสอบ — `test_llm_fallback.py` (29 เทส) +
+`test_handle_chat_fallback.py` (5 เทส) + `test_session_store.py` (5 เทส) **ลบทิ้งแล้ว รวมเป็น
+`test_all.py` (39 เทส) ไฟล์เดียว** เนื้อหาเทสทุกตัวย้ายมาทั้งก้อน ไม่ตัดทอน แค่รวม fake object ที่ซ้ำกัน
+ระหว่าง 2 ไฟล์เดิม (`_FakeChatResponse`, `_FakeChatEngine`) เป็นชุดเดียว — verify แล้ว 39/39 PASS
+(ดู ADR-003 หมายเหตุ 2026-07-05 ส่วนล่างสุดสำหรับรายละเอียด)
+
+**`test_rag_pipeline.py`** (E2E, ต้อง worker จริง+API key) **และ `test_fallback_model.py`**
+(สคริปต์ตรวจชื่อโมเดลด้วยมือ) **ยังคงแยกไฟล์เหมือนเดิม** — ไม่ใช่ pure unit test แบบเดียวกัน จึงไม่รวม
+เข้ามาด้วย วิธีรันตอนนี้:
+```
+venv\Scripts\python.exe test_all.py
+venv\Scripts\python.exe test_rag_pipeline.py
+```
+
+ทุกจุดด้านล่างที่อ้างชื่อ `test_llm_fallback.py`/`test_handle_chat_fallback.py`/`test_session_store.py`
+เป็นบันทึกประวัติ ณ ตอนที่เขียน (ไฟล์เหล่านั้นมีอยู่จริงตอนนั้น) — ไม่ได้แก้ย้อนหลัง ให้ถือว่าชื่อไฟล์ปัจจุบัน
+คือ `test_all.py` เสมอ
+
+---
+
+## 0d. Update (2026-07-05 — ปิด gap `_handle_chat` ไม่มี unit test คุ้ม)
 
 item #4 ใน "0b" ด้านล่าง (และที่ "0c" เคยย้ำว่ายังไม่ resolved) **แก้เสร็จแล้ว** — ดู ADR-003
 หมายเหตุเพิ่มเติม 2026-07-05 (ส่วนล่างสุด) สำหรับรายละเอียดเต็ม สรุปสั้น:
@@ -85,8 +107,8 @@ worker ที่ test เรียกใช้คือโค้ดปัจจ�
   repro script ยืนยันตัวเลข timeout ใหม่ตรงตามสูตร — **ยังไม่ได้รัน `test_rag_pipeline.py` จริงบน
   Windows หลังแก้รอบนี้ ควรรันซ้ำเพื่อยืนยัน (เหมือนที่ "0b" เคยทำหลัง architecture refactor)**
 - เพิ่มคำอธิบายเรื่อง worst-case wait time ลง README.md/README_EN.md แล้ว (อธิบายว่าเจอบ่อยเฉพาะ
-  free tier ไม่ใช่บั๊ก) — **ยังไม่ได้เพิ่มใน README_MANAGEMENT.md/README_MANAGEMENT_EN.md** (แถวตาราง
-  ความเสี่ยง "คำขอไปยัง AI ค้างไม่ตอบสนอง" อาจต้องปรับคำอธิบายให้ตรงกับพฤติกรรมใหม่นี้ด้วย — ยังไม่ทำ)
+  free tier ไม่ใช่บั๊ก) — README_MANAGEMENT.md/README_MANAGEMENT_EN.md **ลบทิ้งแล้ว (2026-07-05)**
+  แทนการแก้ (ผู้ใช้ระบุว่าเป็นเอกสาร "ฉบับส่งผู้บริหาร" ที่ไม่มีผู้อ่านจริง เกิดจากความผิดพลาดตอนสั่งให้เขียน)
 - item #4 ใน "0b" ด้านล่าง (ไม่มี unit test คุ้ม `_handle_chat` fallback loop) — เป็นคนละปัญหากับที่
   แก้รอบนี้ (test coverage vs. client timeout math) **resolved แล้วในรอบถัดมาวันเดียวกัน — ดู "0d"
   ด้านบนสุด**
@@ -310,4 +332,4 @@ None block starting implementation — ADR-006/007 scrutinized clean. Implementa
 - `generate_docx.py` (~90 lines) — Markdown→docx conversion; table rendering just fixed (see Current State), not yet committed.
 - `test_rag_pipeline.py` — 6-test E2E suite, currently 6/6 PASS covering `/draft`, `/draft/questions`, `/chat` — add new tests for ADR-006/007 endpoints, don't touch these.
 - `.env` / `.env.example` — `GEMINI_MODEL_CHAT_FALLBACK`, `GEMINI_MODEL_DRAFT_FALLBACK`, `SESSION_IDLE_TIMEOUT_SECONDS`. `.env` is gitignored.
-- `README.md` / `README_EN.md` / `README_MANAGEMENT*.md` — docs current through ADR-005; will need an update pass once ADR-006/007 ship (not done yet, not urgent until implementation lands).
+- `README.md` / `README_EN.md` — docs current through ADR-005; will need an update pass once ADR-006/007 ship (not done yet, not urgent until implementation lands). (`README_MANAGEMENT*.md` deleted 2026-07-05 — was a fictional "executive summary" doc with no real audience, per user.)

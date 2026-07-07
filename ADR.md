@@ -140,7 +140,7 @@
 
 **แก้โดย**: เพิ่มฟังก์ชันใหม่ `_is_fallback_worthy_error()` ครอบคลุมทั้ง quota error (เดิม) และ timeout/connection/server error (เช็คจาก exception type name + regex บน `timeout`, `deadline`, `503`, `504`, `UNAVAILABLE`) ใช้แทน `_is_quota_error()` เฉพาะตรงจุด "ตัดสินใจ fallback" ทั้ง 2 จุด (ใน `_complete_with_fallback` และ `_handle_chat`) — **retry-with-backoff ของโมเดลหลักยังผูกกับ `_is_quota_error()` เดิมไม่เปลี่ยน** เพราะ backoff (10s/20s) มีประโยชน์เฉพาะ quota error ที่ตอบกลับเร็ว ถ้าเอา timeout ไป retry ด้วย backoff จะยิ่งเสียเวลาซ้ำก่อนได้ลองโมเดลสำรองจริงๆ (worst case เดิมจะกลายเป็นรอ 3×5 นาทีบนโมเดลหลักก่อน แล้วค่อยไปสำรอง)
 
-**ผลลัพธ์**: ตอนนี้ทั้ง quota error และ timeout error จะ trigger fallback เหมือนกัน — README_MANAGEMENT ที่บอกว่า "ปิดความเสี่ยงเรื่องระบบค้าง" + "fallback ทนทานขึ้น" ตอนนี้ตรงกับพฤติกรรมจริงแล้ว (ก่อนหน้านี้สองข้อความนี้จริงแค่แยกกัน ไม่จริงเมื่อรวมกัน) **ยังไม่ได้เพิ่ม unit test จำลอง timeout/non-quota error เพื่อ regression-test เงื่อนไขนี้โดยเฉพาะ — ควรทำเป็นงานถัดไป**
+**ผลลัพธ์**: ตอนนี้ทั้ง quota error และ timeout error จะ trigger fallback เหมือนกัน — คำกล่าวอ้างเดิมว่า "ปิดความเสี่ยงเรื่องระบบค้าง" + "fallback ทนทานขึ้น" ตอนนี้ตรงกับพฤติกรรมจริงแล้ว (ก่อนหน้านี้สองข้อความนี้จริงแค่แยกกัน ไม่จริงเมื่อรวมกัน) **ยังไม่ได้เพิ่ม unit test จำลอง timeout/non-quota error เพื่อ regression-test เงื่อนไขนี้โดยเฉพาะ — ควรทำเป็นงานถัดไป**
 
 ### หมายเหตุเพิ่มเติม (2026-07-05, พบระหว่าง `/scrutinize` + `debug-mantra` repro) — client timeout ไม่เคยถูกปรับตาม fallback chain เลย โดยเฉพาะ `/chat`
 
@@ -165,6 +165,10 @@
 2. `llm_fallback.run_with_fallback()` เดิมมี `sleep=time.sleep` เป็นค่าดีฟอลต์ตรงๆ ที่ signature — ค่านี้ evaluate ครั้งเดียวตอน import โมดูล (ตอน `def` รัน) ทำให้การ monkeypatch `time.sleep` ภายหลังใน `test_handle_chat_fallback.py` (`time.sleep = lambda s: slept.append(s)`) ไม่มีผลเลย เพราะ default ที่ bind ไว้แล้วเป็นคนละ object กับ `time.sleep` ตัวใหม่ — ทำให้เทส `test_quota_error_retries_3_times_with_backoff_then_falls_back` รอ backoff จริง 10s+20s ทุกครั้งที่รัน (ยืนยันจาก timestamp ใน log จริงตอนรันครั้งแรกก่อนแก้) แก้โดยเปลี่ยนดีฟอลต์เป็น `sleep=None` แล้ว resolve เป็น `time.sleep` แบบ lazy ข้างในฟังก์ชันแทน — พฤติกรรมจริง (ไม่มีใคร inject sleep เอง) ไม่เปลี่ยนเลย เพราะ resolve ได้ตัวเดียวกันอยู่ดี แค่ทำให้ monkeypatch ทำงานถูกต้องตอนเทส
 
 **ผลลัพธ์**: รัน `py_compile` + unit test ทั้งหมดในสภาพแวดล้อมสะอาด (`worker_client.py`, `worker_handlers.py`, `llm_fallback.py`, `test_rag_pipeline.py`, `rag_worker.py`, `worker_config.py`, `worker_state.py`, `worker_parsing.py`, `worker_prompts.py`, `worker_retrieval.py`, `app.py`, `test_llm_fallback.py`, `test_handle_chat_fallback.py`, `test_session_store.py`) — compile สะอาดทุกไฟล์, `test_llm_fallback.py` 29/29 PASS (25 เดิม + 4 ใหม่), `test_handle_chat_fallback.py` 5/5 PASS, `test_session_store.py` 5/5 PASS (regression, ไม่แตะไฟล์นี้เลย) **gap ที่ HANDOFF.md "0b" ข้อ 4 เคยระบุไว้ว่า `_handle_chat` ไม่มี unit test คุ้ม ปิดแล้ว — ดู HANDOFF.md "0c" อัปเดต**
+
+### หมายเหตุเพิ่มเติม (2026-07-05, ต่อจากหมายเหตุด้านบน) — รวม 3 ไฟล์ unit test เดิมเป็นไฟล์เดียว
+
+**การตัดสินใจ**: `test_llm_fallback.py` (29 เทส) + `test_handle_chat_fallback.py` (5 เทส) + `test_session_store.py` (5 เทส) ที่กล่าวถึงข้างต้นทั้งหมด **รวมเป็นไฟล์เดียวแล้วคือ `test_all.py` (39 เทส)** ตามคำขอผู้ใช้ให้เหลือไฟล์ทดสอบเดียวที่รวมทุกฟังก์ชันที่ต้องทดสอบ — ทั้ง 3 ไฟล์เดิมเป็น pure `unittest` เหมือนกันหมด (ไม่มี dependency นอก stdlib) จึงรวมกันได้ตรงไปตรงมา คลาสเทสและเนื้อหาเทสทุกตัวเหมือนเดิมทุกประการ (ย้ายมาทั้งก้อน ไม่ได้ตัดทอน) แค่รวม fake object ที่ซ้ำกันเป๊ะๆ ระหว่าง 2 ไฟล์ (`_FakeChatResponse`, `_FakeChatEngine`) เป็นชุดเดียว — verify แล้วผ่านครบ 39/39 PASS ในสภาพแวดล้อมเดียวกัน **`test_rag_pipeline.py` (E2E, ต้องมี worker จริง+API key) และ `test_fallback_model.py` (สคริปต์ตรวจชื่อโมเดลด้วยมือ) ยังคงแยกไฟล์เหมือนเดิม — ไม่ใช่ pure unit test แบบเดียวกัน จึงไม่รวมเข้ามาด้วย**
 
 ---
 
